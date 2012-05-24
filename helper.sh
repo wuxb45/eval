@@ -1,16 +1,22 @@
 #!/bin/bash
 
 xx=TestStorage
+syncbin ()
+{
+  server=$1
+  ssh ${server} killall "${xx}"
+  rsync -vz "${xx}" "${server}:~/program/usr/bin/${xx}"
+}
 
 case "$1" in
     d) # distribute
-      rsync -v "$xx" think:~/program/usr/bin/"$xx"
-      rsync -v "$xx" server:~/program/usr/bin/"$xx"
-      rsync -v "$xx" dell:~/program/usr/bin/"$xx"
-      rsync -v "$xx" dualcore:~/program/usr/bin/"$xx"
+      syncbin think
+      syncbin server
+      syncbin dell
+      #syncbin dualcore
       ;;
     b) # build
-      ghc --make -threaded -fllvm -fforce-recomp "$xx"
+      ghc --make -Wall -threaded -fllvm -fforce-recomp "$xx"
       ;;
 esac
     
