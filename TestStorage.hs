@@ -30,9 +30,14 @@ runClient args = do
   putStrLn $ "server list: " ++ show mbList
   case mbList of
     Just (a:_) -> do
-      result <- accessServer a (clientH args)
+      result <- accessServer a (clientCmdH args)
+      result' <- accessServer a (clientCmdH ["backup"])
       case result of
         Just (Left ok) -> putStrLn $ "result: " ++ show ok
         Just (Right lst) -> putStrLn "resule list: " >> mapM_ putStrLn lst
         _ -> putStrLn "accessServer failed"
+      case result' of
+        Just (Left ok) -> putStrLn $ "backup " ++ show ok
+        Just _ -> putStrLn "backup???"
+        _ -> putStrLn "backup: accessServer failed"
     _ -> putStrLn "no server!!"

@@ -9,7 +9,8 @@
 module Eval.DServ (
   aHandler, ioaHandler,
   AHandler, IOHandler,
-  DServerInfo(..), DService(..), DServerData(..), ZKInfo(..),
+  DServerInfo(..), DService(..), DServerData(..),
+  ZKInfo(..),
   commonInitial,
   forkServer, closeServer,
   waitCloseCmd, waitCloseSignal,
@@ -20,7 +21,11 @@ module Eval.DServ (
 -- }}}
 
 -- import {{{
-import Prelude (($), (.), (/), (-), (+), (>), (==),
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
+import qualified System.Posix.Signals as Sig
+----
+import Prelude (($), (.), (/), (-), (+), (>), (==), Eq, Ord,
                 String, fromIntegral, id, Float, fst, Integral, Integer)
 import Control.Applicative ((<$>))
 import Control.Monad (Monad(..), void, when,)
@@ -30,8 +35,6 @@ import Control.Exception (SomeException, Exception,
                           handle, bracket, catch, throwTo,)
 import Data.Either (Either(..))
 import Data.Serialize (Serialize(..), encode, decode, encodeLazy, decodeLazy, )
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
 import Data.Int (Int)
 import Data.Bool (Bool(..))
 import Data.IORef (IORef, newIORef, writeIORef, readIORef,)
@@ -42,11 +45,8 @@ import GHC.Generics (Generic)
 import Network (HostName, PortID(..), Socket, connectTo,
                 accept, listenOn, sClose,)
 import Network.Socket(getNameInfo, SockAddr(..),)
---import System.Log.Logger (errorM, debugM, infoM, warningM, noticeM, )
---import System.CPUTime (getCPUTime,)
 import System.IO (IO, hGetLine, hFlush, hPutStrLn, Handle, hClose, getLine,
                   hSetBuffering, BufferMode(..), putStrLn, hWaitForInput, stdin)
-import qualified System.Posix.Signals as Sig
 import Text.Read (read)
 import Text.Show (Show(..))
 import Text.Printf (printf)
@@ -65,7 +65,7 @@ data DServerInfo = DServerInfo
   { dsiHostName   :: HostName,
     dsiPortNumber :: Integer,
     dsiServType   :: String
-  } deriving (Show, Generic)
+  } deriving (Show, Generic, Eq, Ord)
 instance Serialize DServerInfo where
 
 -- }}}
