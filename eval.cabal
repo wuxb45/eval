@@ -1,0 +1,38 @@
+Name:           eval
+Version:        0.0.1
+Synopsis:       Eval
+Homepage:       http://github.com/wuxb45
+Category:       Distributed
+Author:         Wu Xingbo
+Maintainer:     Wu Xingbo
+License:        BSD3
+License-file:   LICENSE
+Cabal-Version:  >= 1.4
+Build-type:     Simple
+
+library
+  build-depends:
+    base,
+    bytestring,
+    cereal,
+    concurrent-extra,
+    containers,
+    cryptohash,
+    deepseq,
+    directory,
+    filepath,
+    ghc-prim,
+    mtl,
+    network,
+    rdtsc,
+    unix,
+    zookeeper
+
+  exposed-modules:
+    Eval.Storage,
+    Eval.DServ,
+    Eval.Lib,
+    Eval.Types
+
+  ghc-options:
+    -Wall
