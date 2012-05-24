@@ -1,10 +1,10 @@
-module Lib where
+module Eval.Lib where
 import qualified Data.Map as Map
-import Types
+import Eval.Types
 
 define :: String -> Expr -> Expr -> Expr
-define id expr (Let bindings body) = Let ((id, expr):bindings) body
-define id expr expr1 = Let [(id, expr)] expr1
+define name expr (Let bindings body) = Let ((name, expr):bindings) body
+define name expr expr1 = Let [(name, expr)] expr1
 
 parmap :: Expr
 parmap = Lambda ["mapper", "res-list"] $

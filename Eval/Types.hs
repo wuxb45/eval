@@ -1,11 +1,15 @@
 -- head {{{
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-module Types where
-import Text.Show
---import Data.List
-import Control.Applicative ((<$>), (<*>))
+module Eval.Types where
+-- }}}
+
+-- import {{{
 import qualified Data.Map as Map
-import qualified Data.Sequence as Seq
+-------------
+import Prelude(($), (.), (+), String, Bool(..), Int, Either(..), Integer, IO,)
+import Data.Maybe (maybe,)
+import Data.List (concatMap, (++), repeat, take,)
+import Text.Show (Show(..), )
 import Control.Monad.Error
 -- }}}
 
@@ -165,7 +169,7 @@ showExpr d (Begin exprL) =
 showExpr d (Par exprL) =
   "|->\n" ++ concatMap (\e -> showD (d + 1)
                          ++ showExpr (d + 1) e ++ "\n") exprL
-showExpr d (Apply name params) =
+showExpr _ (Apply name params) =
   name ++ show params
 showExpr d (If pred y n) =
   "IF (" ++ show pred ++ ")\n"
@@ -188,13 +192,13 @@ instance Show Expr where
 type Env = BindingMap
 
 envGet :: String -> Env -> TError Binding
-envGet id bmap = maybe (throwError noMsg) return $ Map.lookup id bmap
+envGet name bindmap = maybe (throwError noMsg) return $ Map.lookup name bindmap
 
 envGetIO :: String -> Env -> IOTError Binding
-envGetIO id map = liftThrows $ envGet id map
+envGetIO name env = liftThrows $ envGet name env
 
 envPut :: String -> Binding -> Env -> Env
-envPut id binding bmap = Map.insert id binding bmap
+envPut name binding bmap = Map.insert name binding bmap
 
 -- }}}
 

@@ -5,6 +5,7 @@
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DoAndIfThenElse #-}
 -- }}}
 
 -- module export {{{
