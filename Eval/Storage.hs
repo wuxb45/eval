@@ -6,16 +6,24 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DoAndIfThenElse #-}
+{-# LANGUAGE RecordWildCards #-}
 -- }}}
 
 -- module export {{{
 module Eval.Storage (
-  DSConfig(..), DSReq(..), DSResp(..), CheckSum,
+  DSConfig, DSReq(..), DSResp(..), CheckSum,
+  DSNode(..), DSDirInfo, DSFile(..), DSData,
   checkSumBS, checkSumBSL, checkSumFile, checkSumDSPath,
   uniqueName, openBinBufFile, getFileSize,
   pipeSome, pipeAll,
   makeDSService, storageServiceType,
+  clientPutFile, clientPutBS, clientPutH,
+  clientGetFile,
+  clientList, clientDel,
+  clientFreeze, clientFreezeAll, clientCacheSize,
+  clientGetSum, clientVerify, clientBackup,
   clientCmdH,
+  listOnlineStorage,
   ) where
 -- }}}
 
@@ -44,7 +52,7 @@ import System.IO (Handle, withFile, IOMode(..), withBinaryFile,
                   putStrLn, BufferMode(..), hSetBuffering,
                   openBinaryFile, hClose)
 import Data.Tuple (swap,)
-import Data.List (foldl', concatMap, map,)
+import Data.List (foldl', concatMap, map, filter,)
 import System.IO.Unsafe (unsafePerformIO)
 import System.FilePath (FilePath, (</>),)
 import System.Directory (removeFile, createDirectoryIfMissing)
@@ -58,7 +66,9 @@ import Data.Serialize (Serialize(..),)
 import System.CPUTime.Rdtsc (rdtsc)
 ------
 import Eval.DServ (AHandler, IOHandler, DService(..),
-                   aHandler, ioaHandler, putObject, getObject)
+                   ZKInfo(..), DServerInfo(..),
+                   aHandler, ioaHandler, putObject, getObject,
+                   listServer, accessServer,)
 -- }}}
 
 -- data {{{
@@ -122,6 +132,8 @@ data DSReq
   | DSRCacheSize
   | DSRVerify     String (Maybe CheckSum) -- verify by checksum, delete on fail
   | DSRGetSum     String
+  | DSRDupFile    String DServerInfo
+  | DSRDupCache   String DServerInfo
   deriving (Generic, Show)
 instance Serialize DSReq where
 -- }}}
@@ -366,7 +378,7 @@ nodeRemoteWriteCache node name size remoteH = do
   putStrLn "write cache finished"
   RWVar.modify_ (nodeCacheM node) $ return . Map.insert name bs
   respOK remoteH
-  void $ forkIO $ nodeLocalDumpFile node name
+  --void $ forkIO $ nodeLocalDumpFile node name
 -- }}}
 
 -- nodeRemoteDeleteFile {{{
@@ -435,6 +447,30 @@ nodeRemoteGetSum node name remoteH = do
           respOK remoteH
           putObject remoteH $ checkSumBS bs
           respOK remoteH
+        _ -> respFail remoteH
+-- }}}
+
+-- nodeRemoteDupFile {{{
+nodeRemoteDup :: Bool -> DSNode -> String -> DServerInfo -> Handle -> IO ()
+nodeRemoteDup cache node name target remoteH = do
+  respOK remoteH
+  mbbs <- nodeLookupCache node name
+  case mbbs of
+    Just bs -> do
+      mbok <- accessServer target (clientPutBS cache name bs)
+      case mbok of
+        Just True -> respOK remoteH
+        _ -> respFail remoteH
+    _ -> do
+      mbdsfile <- nodeLookupFile node name
+      case mbdsfile of
+        Just dsfile -> do
+          localH <- openDSFile node dsfile ReadMode
+          let size = fst $ dsCheckSum dsfile
+          mbok <- accessServer target (clientPutH cache name localH size)
+          case mbok of
+            Just True -> respOK remoteH
+            _ -> respFail remoteH
         _ -> respFail remoteH
 -- }}}
 
@@ -622,8 +658,10 @@ handleReq :: DSNode -> Handle -> DSReq -> IO ()
 handleReq node remoteH req = do
   case req of
     -- Get
-    (DSRGetFile name) -> respDo $ nodeRemoteReadFile node name remoteH
-    (DSRGetCache name) -> respDo $ nodeRemoteReadCache node name remoteH
+    (DSRGetFile name) ->
+      respDo $ nodeRemoteReadFile node name remoteH
+    (DSRGetCache name) ->
+      respDo $ nodeRemoteReadCache node name remoteH
     -- Put
     (DSRPutFile name len) -> do
       putStrLn $ "processing PutFile"
@@ -634,20 +672,34 @@ handleReq node remoteH req = do
       then respFail remoteH
       else respDo $ nodeRemoteWriteCache node name len remoteH
     -- List
-    (DSRListFile) -> respDo $ nodeRemoteListFile node remoteH
-    (DSRListCache) -> respDo $ nodeRemoteListCache node remoteH
+    (DSRListFile) ->
+      respDo $ nodeRemoteListFile node remoteH
+    (DSRListCache) ->
+      respDo $ nodeRemoteListCache node remoteH
     -- Del
-    (DSRDelFile name) -> respDo $ nodeRemoteDeleteFile node name remoteH
-    (DSRDelCache name) -> respDo $ nodeRemoteDeleteCache node name remoteH
+    (DSRDelFile name) ->
+      respDo $ nodeRemoteDeleteFile node name remoteH
+    (DSRDelCache name) ->
+      respDo $ nodeRemoteDeleteCache node name remoteH
     -- Freeze
-    (DSRFreeze name) -> respOKDo $ nodeLocalFreezeData node name
-    (DSRFreezeAll) -> respOKDo $ nodeLocalFreezeAll node
+    (DSRFreeze name) ->
+      respOKDo $ nodeLocalFreezeData node name
+    (DSRFreezeAll) ->
+      respOKDo $ nodeLocalFreezeAll node
     -- Dump
-    (DSRBackup) -> respOKDo $ nodeLocalBackupMeta node
+    (DSRBackup) ->
+      respOKDo $ nodeLocalBackupMeta node
     -- Cache size
-    (DSRCacheSize) -> respDo $ nodeRemoteMemoryUsage node remoteH
-    (DSRVerify name mbsum) -> respDo $ nodeRemoteVerify node name mbsum remoteH
-    (DSRGetSum name) -> respDo $ nodeRemoteGetSum node name remoteH
+    (DSRCacheSize) ->
+      respDo $ nodeRemoteMemoryUsage node remoteH
+    (DSRVerify name mbsum) ->
+      respDo $ nodeRemoteVerify node name mbsum remoteH
+    (DSRGetSum name) ->
+      respDo $ nodeRemoteGetSum node name remoteH
+    (DSRDupFile name target) ->
+      respDo $ nodeRemoteDup False node name target remoteH
+    (DSRDupCache name target) ->
+      respDo $ nodeRemoteDup True node name target remoteH
   where
     respDo op = op `catch` (ioaHandler (respFail remoteH) ())
     respOKDo op = respDo (op >> respOK remoteH)
@@ -665,44 +717,71 @@ closeStorage h = do
 
 -- Storage Client {{{
 
--- clientPut {{{
-clientPut :: Bool -> String -> FilePath -> AHandler Bool
-clientPut cache name filepath remoteH = do
-  size <- getFileSize filepath
-  putObject remoteH $ (if cache then DSRPutCache else DSRPutFile) name size
+-- clientTwoStage {{{
+clientTwoStage :: DSReq -> AHandler Bool -> AHandler Bool
+clientTwoStage req h remoteH = do
+  putObject remoteH req
   (mbResp1 :: Maybe DSResp) <- getObject remoteH
   case mbResp1 of
     Just DSROkay -> do
-      openBinBufFile filepath ReadMode >>= flip pipeAll remoteH
-      (mbResp2 :: Maybe DSResp) <- getObject remoteH
-      case mbResp2 of
-        Just DSROkay -> return True
-        Just DSRFail -> putStrLn "resp2 failed" >> return False
-        _ -> putStrLn "recv resp2 failed" >> return False
-    Just DSRFail -> putStrLn "resp1 failed" >> return False
-    _ -> putStrLn "recv resp1 failed" >> return False
--- }}}
-
--- clientGet {{{
-clientGet :: Bool -> String -> FilePath -> AHandler Bool
-clientGet cache name localpath remoteH = do
-  putObject remoteH $ (if cache then DSRGetCache else DSRGetFile) name
-  (mbResp1 :: Maybe DSResp) <- getObject remoteH
-  case mbResp1 of
-    Just DSROkay -> do
-      (mbSize :: Maybe Integer) <- getObject remoteH
-      case mbSize of
-        Just size -> do
-          localH <- openBinBufFile localpath WriteMode
-          pipeSome size remoteH localH
+      ok <- h remoteH `catch` aHandler False
+      case ok of
+        True -> do
           (mbResp2 :: Maybe DSResp) <- getObject remoteH
           case mbResp2 of
             Just DSROkay -> return True
             Just DSRFail -> putStrLn "resp2 failed" >> return False
             _ -> putStrLn "recv resp2 failed" >> return False
-        _ -> putStrLn "get size failed" >> return False
+        False -> putStrLn "the work failed" >> return False
     Just DSRFail -> putStrLn "resp1 failed" >> return False
-    _ -> putStrLn "get resp1 failed" >> return False
+    _ -> putStrLn "recv resp1 failed" >> return False
+-- }}}
+
+-- clientPutFile {{{
+clientPutFile :: Bool -> String -> FilePath -> AHandler Bool
+clientPutFile cache name filepath remoteH = do
+  size <- getFileSize filepath
+  clientTwoStage (req size) putData remoteH
+  where
+    req size = (if cache then DSRPutCache else DSRPutFile) name size
+    putData rH = do
+      openBinBufFile filepath ReadMode >>= flip pipeAll rH
+      return True
+-- }}}
+
+-- clientPutBS {{{
+clientPutBS :: Bool -> String -> BS.ByteString -> AHandler Bool
+clientPutBS cache name bs remoteH = do
+  clientTwoStage req putData remoteH
+  where
+    size = toInteger $ BS.length bs
+    req = (if cache then DSRPutCache else DSRPutFile) name size
+    putData rH = BS.hPut rH bs >> return True
+-- }}}
+
+-- clientPutH {{{
+clientPutH :: Bool -> String -> Handle -> Integer -> AHandler Bool
+clientPutH cache name from size remoteH = do
+  clientTwoStage req pipeData remoteH
+  where
+    req = (if cache then DSRPutCache else DSRPutFile) name size
+    pipeData rH = pipeSome size from rH >> return True
+-- }}}
+
+-- clientGetFile {{{
+clientGetFile :: Bool -> String -> FilePath -> AHandler Bool
+clientGetFile cache name localpath remoteH = do
+  clientTwoStage req getFile remoteH
+  where
+    req = (if cache then DSRGetCache else DSRGetFile) name
+    getFile rH = do
+      (mbSize :: Maybe Integer) <- getObject remoteH
+      case mbSize of
+        Just size -> do
+          localH <- openBinBufFile localpath WriteMode
+          pipeSome size rH localH
+          return True
+        _ -> return False
 -- }}}
 
 -- clientNoRecv {{{
@@ -737,11 +816,9 @@ clientRecvA req remoteH = do
 -- }}}
 
 -- client* with name {{{
-clientDelFile :: String -> AHandler Bool
-clientDelFile name = clientNoRecv $ DSRDelFile name
-
-clientDelCache :: String -> AHandler Bool
-clientDelCache name = clientNoRecv $ DSRDelCache name
+clientDel :: Bool -> String -> AHandler Bool
+clientDel cache name = clientNoRecv $
+  if cache then DSRDelCache name else DSRDelFile name
 
 clientFreeze :: String -> AHandler Bool
 clientFreeze name = clientNoRecv $ DSRFreeze name
@@ -785,23 +862,49 @@ clientGetSum name remoteH = do
 
 -- clientCmdH {{{
 clientCmdH :: [String] -> AHandler (Either Bool [String])
-clientCmdH ("put":name:filename:[]) = (Left <$>) . clientPut False name filename
-clientCmdH ("putc":name:filename:[]) = (Left <$>) . clientPut True name filename
-clientCmdH ("get":name:filename:[]) = (Left <$>) . clientGet False name filename
-clientCmdH ("getc":name:filename:[]) = (Left <$>) . clientGet True name filename
-clientCmdH ("del":name:[]) = (Left <$>) . clientDelFile name
-clientCmdH ("delc":name:[]) = (Left <$>) . clientDelCache name
-clientCmdH ("ls":[]) = (Right . map show . Map.toList <$>) . clientList False
-clientCmdH ("lsc":[]) = (Right . map show . Map.toList <$>) . clientList True
-clientCmdH ("freeze":name:[]) = (Left <$>) . clientFreeze name
-clientCmdH ("freeze":[]) = (Left <$>) . clientFreezeAll
-clientCmdH ("backup":[]) = (Left <$>) . clientBackup
-clientCmdH ("cachesize":[]) = ((\s -> Right [show s]) <$>) . clientCacheSize
-clientCmdH ("getsum":name:[]) = (Right <$>) . clientGetSum name
-clientCmdH ("verify":name:[]) = (Left <$>) . clientVerify name Nothing
-clientCmdH ("verify":name:size:sum:[]) = do
-             (Left <$>) . clientVerify name (Just (read size, sum))
-clientCmdH cmd = const $ (putStrLn $ "?: " ++ show cmd) >> (return $ Left False)
+clientCmdH ("put":name:filename:[]) =
+  (Left <$>) . clientPutFile False name filename
+clientCmdH ("putc":name:filename:[]) =
+  (Left <$>) . clientPutFile True name filename
+clientCmdH ("get":name:filename:[]) =
+  (Left <$>) . clientGetFile False name filename
+clientCmdH ("getc":name:filename:[]) =
+  (Left <$>) . clientGetFile True name filename
+clientCmdH ("del":name:[]) =
+  (Left <$>) . clientDel False name
+clientCmdH ("delc":name:[]) =
+  (Left <$>) . clientDel True name
+clientCmdH ("ls":[]) =
+  (Right . map show . Map.toList <$>) . clientList False
+clientCmdH ("lsc":[]) =
+  (Right . map show . Map.toList <$>) . clientList True
+clientCmdH ("freeze":name:[]) =
+  (Left <$>) . clientFreeze name
+clientCmdH ("freeze":[]) =
+  (Left <$>) . clientFreezeAll
+clientCmdH ("backup":[]) =
+  (Left <$>) . clientBackup
+clientCmdH ("cachesize":[]) =
+  ((\s -> Right [show s]) <$>) . clientCacheSize
+clientCmdH ("getsum":name:[]) =
+  (Right <$>) . clientGetSum name
+clientCmdH ("verify":name:[]) =
+  (Left <$>) . clientVerify name Nothing
+clientCmdH ("verify":name:size:sum:[]) =
+  (Left <$>) . clientVerify name (Just (read size, sum))
+clientCmdH cmd =
+  const $ (putStrLn $ "?: " ++ show cmd) >> (return $ Left False)
+-- }}}
+
+-- listOnlineStorage {{{
+listOnlineStorage :: ZKInfo -> IO [DServerInfo]
+listOnlineStorage zkinfo = do
+  mbList <- listServer zkinfo
+  case mbList of
+    Just lst -> return $ filter isStorage lst
+    _ -> return []
+  where
+    isStorage (DServerInfo{..}) = dsiServType == storageServiceType
 -- }}}
 
 -- }}}
