@@ -860,6 +860,12 @@ clientGetSum name remoteH = do
   return $ maybe [] (\(a,b) -> [show a, show b]) mbsum
 -- }}}
 
+-- clientDup {{{
+clientDup :: Bool -> String -> DServerInfo -> AHandler Bool
+clientDup cache name target = do
+  clientNoRecv $ (if cache then DSRDupCache else DSRDupFile) name target
+-- }}}
+
 -- clientCmdH {{{
 clientCmdH :: [String] -> AHandler (Either Bool [String])
 clientCmdH ("put":name:filename:[]) =
@@ -892,6 +898,14 @@ clientCmdH ("verify":name:[]) =
   (Left <$>) . clientVerify name Nothing
 clientCmdH ("verify":name:size:sum:[]) =
   (Left <$>) . clientVerify name (Just (read size, sum))
+clientCmdH ("dup":name:tHost:tPort:[]) =
+  (Left <$>) . clientDup False name serverinfo
+  where
+    serverinfo = DServerInfo tHost (read tPort) storageServiceType
+clientCmdH ("dupc":name:tHost:tPort:[]) =
+  (Left <$>) . clientDup True name serverinfo
+  where
+    serverinfo = DServerInfo tHost (read tPort) storageServiceType
 clientCmdH cmd =
   const $ (putStrLn $ "?: " ++ show cmd) >> (return $ Left False)
 -- }}}

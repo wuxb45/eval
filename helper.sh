@@ -4,8 +4,9 @@ xx=TestStorage
 syncbin ()
 {
   server=$1
-  ssh ${server} killall "${xx}"
-  rsync -vz "${xx}" "${server}:~/program/usr/bin/${xx}"
+  ssh ${server} killall -q "${xx}"
+  echo "sync to ${server}"
+  rsync -z "${xx}" "${server}:~/program/usr/bin/${xx}"
 }
 
 case "$1" in
@@ -16,7 +17,7 @@ case "$1" in
       #syncbin dualcore
       ;;
     b) # build
-      ghc --make -Wall -threaded -fllvm -fforce-recomp "$xx"
+      ghc --make -Wall -threaded -fforce-recomp "$xx"
       ;;
 esac
     
