@@ -11,11 +11,13 @@ module Eval.DServ (
   aHandler, ioaHandler,
   AHandler, IOHandler,
   DServerInfo(..), DService(..), DServerData(..),
-  ZKInfo(..),
+  ZKInfo(..), DResp(..),
+  respOK, respFail,
   commonInitial,
   forkServer, closeServer,
   waitCloseCmd, waitCloseSignal,
   listServer, accessServer,
+  forkWatcher, forkChildrenWatcher, forkValueWatcher,
   putObject, getObject,
   putObjectLazy, getObjectLazy,
   ) where
@@ -31,7 +33,8 @@ import Prelude (($), (.), (/), (-), (+), (>), (==), Eq, Ord,
 import Control.Applicative ((<$>))
 import Control.Monad (Monad(..), void, when,)
 import Control.Concurrent (forkIO, yield, ThreadId,)
-import Control.Concurrent.MVar (MVar, takeMVar, newEmptyMVar, tryPutMVar,)
+import Control.Concurrent.MVar (MVar, putMVar, takeMVar,
+                                newEmptyMVar, tryPutMVar,)
 import Control.Exception (SomeException, Exception,
                           handle, bracket, catch, throwTo,)
 import Data.Either (Either(..))
@@ -98,6 +101,10 @@ data CloseException = CloseException
   deriving (Typeable, Show)
 instance Exception CloseException where
 -- }}}
+-- DSResp {{{
+data DResp = DRFail | DROkay deriving (Generic, Show)
+instance Serialize DResp where
+-- }}}
 -- }}}
 
 -- common {{{
@@ -129,6 +136,14 @@ ioaHandler io a e = do
   putStrLn $ "ioaHandler caught Exception: " ++ show e
   io
   return a
+-- }}}
+-- respOK {{{
+respOK :: Handle -> IO ()
+respOK remoteH = putObject remoteH DROkay
+-- }}}
+-- respFail {{{
+respFail :: Handle -> IO ()
+respFail remoteH = putObject remoteH DRFail
 -- }}}
 -- }}}
 
@@ -277,6 +292,46 @@ accessServer dsi handler = (Just <$> runner) `catch` exHandler
     exHandler (e :: SomeException) = do
       putStrLn $ "accessServer, error" ++ show e
       return Nothing
+-- }}}
+-- }}}
+
+-- with ZK {{{
+-- forkChildrenWatcher {{{
+forkChildrenWatcher :: ZKInfo -> String -> ([String] -> IO a) -> IO Bool
+forkChildrenWatcher zkinfo path action = do
+  forkWatcher zkinfo path rewatcher action
+  where
+    rewatcher zh = maybe [] id <$> Zoo.getChildrenSafe zh path Zoo.Watch
+-- }}}
+-- forkValueWatcher {{{
+forkValueWatcher :: ZKInfo -> String -> (Maybe BS.ByteString -> IO a) -> IO Bool
+forkValueWatcher zkinfo path action = do
+  forkWatcher zkinfo path rewatcher action
+  where
+    rewatcher zh = maybe Nothing fst <$> Zoo.getSafe zh path Zoo.Watch
+-- }}}
+-- forkWatcher {{{
+forkWatcher :: ZKInfo -> String -> (Zoo.ZHandle -> IO a) -> (a -> IO b) -> IO Bool
+forkWatcher (ZKInfo hostport) path rewatcher action = do
+  mbzh <- Zoo.initSafe hostport Nothing 100000
+  case mbzh of
+    Just zh -> do
+      mvar <- newEmptyMVar
+      Zoo.setWatcher zh $ Just $ watcher mvar
+      void $ rewatcher zh
+      void $ forkIO $ handler mvar
+      return True
+    _ -> return False
+  where
+    watcher mvar zh _ _ path = do
+      putStrLn "get event"
+      putMVar mvar zh
+    handler mvar = do
+      putStrLn "handler: waiting"
+      zh <- takeMVar mvar
+      a <- rewatcher zh
+      void $ action a
+      handler mvar
 -- }}}
 -- }}}
 

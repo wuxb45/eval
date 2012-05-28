@@ -11,7 +11,7 @@
 
 -- module export {{{
 module Eval.Storage (
-  DSConfig, DSReq(..), DSResp(..), CheckSum,
+  DSConfig, DSReq(..), CheckSum,
   DSNode(..), DSDirInfo, DSFile(..), DSData,
   checkSumBS, checkSumBSL, checkSumFile, checkSumDSPath,
   uniqueName, openBinBufFile, getFileSize,
@@ -68,7 +68,8 @@ import System.CPUTime.Rdtsc (rdtsc)
 import Eval.DServ (AHandler, IOHandler, DService(..),
                    ZKInfo(..), DServerInfo(..),
                    aHandler, ioaHandler, putObject, getObject,
-                   listServer, accessServer,)
+                   listServer, accessServer,
+                   DResp(..), respOK, respFail,)
 -- }}}
 
 -- data {{{
@@ -136,10 +137,6 @@ data DSReq
   | DSRDupCache   String DServerInfo
   deriving (Generic, Show)
 instance Serialize DSReq where
--- }}}
--- DSResp {{{
-data DSResp = DSRFail | DSROkay deriving (Generic, Show)
-instance Serialize DSResp where
 -- }}}
 -- }}}
 
@@ -247,16 +244,6 @@ pipeAll from to = do
   unless (BS.null bs) $ pipeAll from to
   where
     lim = 0x100000
--- }}}
-
--- respOK {{{
-respOK :: Handle -> IO ()
-respOK remoteH = putObject remoteH DSROkay
--- }}}
-
--- respFail {{{
-respFail :: Handle -> IO ()
-respFail remoteH = putObject remoteH DSRFail
 -- }}}
 
 -- }}}
@@ -705,11 +692,11 @@ handleReq node remoteH req = do
     respOKDo op = respDo (op >> respOK remoteH)
 -- }}}
 
--- closer {{{
+-- closeStorage {{{
 closeStorage :: IOHandler
 closeStorage h = do
   putObject h DSRFreezeAll
-  void $ (getObject h :: IO (Maybe DSResp))
+  void $ (getObject h :: IO (Maybe DResp))
   return ()
 -- }}}
 
@@ -721,19 +708,19 @@ closeStorage h = do
 clientTwoStage :: DSReq -> AHandler Bool -> AHandler Bool
 clientTwoStage req h remoteH = do
   putObject remoteH req
-  (mbResp1 :: Maybe DSResp) <- getObject remoteH
+  (mbResp1 :: Maybe DResp) <- getObject remoteH
   case mbResp1 of
-    Just DSROkay -> do
+    Just DROkay -> do
       ok <- h remoteH `catch` aHandler False
       case ok of
         True -> do
-          (mbResp2 :: Maybe DSResp) <- getObject remoteH
+          (mbResp2 :: Maybe DResp) <- getObject remoteH
           case mbResp2 of
-            Just DSROkay -> return True
-            Just DSRFail -> putStrLn "resp2 failed" >> return False
+            Just DROkay -> return True
+            Just DRFail -> putStrLn "resp2 failed" >> return False
             _ -> putStrLn "recv resp2 failed" >> return False
         False -> putStrLn "the work failed" >> return False
-    Just DSRFail -> putStrLn "resp1 failed" >> return False
+    Just DRFail -> putStrLn "resp1 failed" >> return False
     _ -> putStrLn "recv resp1 failed" >> return False
 -- }}}
 
@@ -788,10 +775,10 @@ clientGetFile cache name localpath remoteH = do
 clientNoRecv :: DSReq -> AHandler Bool
 clientNoRecv req remoteH = do
   putObject remoteH req
-  (mbResp1 :: Maybe DSResp) <- getObject remoteH
+  (mbResp1 :: Maybe DResp) <- getObject remoteH
   case mbResp1 of
-    Just DSROkay -> return True
-    Just DSRFail -> putStrLn "resp failed" >> return False
+    Just DROkay -> return True
+    Just DRFail -> putStrLn "resp failed" >> return False
     _ -> putStrLn "recv resp failed" >> return False
 -- }}}
 
@@ -799,19 +786,19 @@ clientNoRecv req remoteH = do
 clientRecvA :: Serialize a => DSReq -> AHandler (Maybe a)
 clientRecvA req remoteH = do
   putObject remoteH $ req
-  (mbResp1 :: Maybe DSResp) <- getObject remoteH
+  (mbResp1 :: Maybe DResp) <- getObject remoteH
   case mbResp1 of
-    Just DSROkay -> do
+    Just DROkay -> do
       (mbA :: Maybe a) <- getObject remoteH
       case mbA of
         Just _ -> do
-          (mbResp2 :: Maybe DSResp) <- getObject remoteH
+          (mbResp2 :: Maybe DResp) <- getObject remoteH
           case mbResp2 of
-            Just DSROkay -> return mbA
-            Just DSRFail -> putStrLn "resp2 failed" >> return Nothing
+            Just DROkay -> return mbA
+            Just DRFail -> putStrLn "resp2 failed" >> return Nothing
             _ -> putStrLn "recv resp2 failed" >> return Nothing
         _ -> putStrLn "get A failed" >> return Nothing
-    Just DSRFail -> putStrLn "resp1 failed" >> return Nothing
+    Just DRFail -> putStrLn "resp1 failed" >> return Nothing
     _ -> putStrLn "get resp1 failed" >> return Nothing
 -- }}}
 
