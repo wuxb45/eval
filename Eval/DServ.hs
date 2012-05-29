@@ -18,6 +18,7 @@ module Eval.DServ (
   waitCloseCmd, waitCloseSignal,
   listServer, accessServer,
   forkWatcher, forkChildrenWatcher, forkValueWatcher,
+  clientNoRecv, clientTwoStage, clientRecvA,
   putObject, getObject,
   putObjectLazy, getObjectLazy,
   ) where
@@ -293,26 +294,75 @@ accessServer dsi handler = (Just <$> runner) `catch` exHandler
       putStrLn $ "accessServer, error" ++ show e
       return Nothing
 -- }}}
+
+-- clientTwoStage {{{
+clientTwoStage :: (Serialize r) => r -> AHandler Bool -> AHandler Bool
+clientTwoStage req h remoteH = do
+  putObject remoteH req
+  (mbResp1 :: Maybe DResp) <- getObject remoteH
+  case mbResp1 of
+    Just DROkay -> do
+      ok <- h remoteH `catch` aHandler False
+      case ok of
+        True -> do
+          (mbResp2 :: Maybe DResp) <- getObject remoteH
+          case mbResp2 of
+            Just DROkay -> return True
+            Just DRFail -> putStrLn "resp2 failed" >> return False
+            _ -> putStrLn "recv resp2 failed" >> return False
+        False -> putStrLn "the work failed" >> return False
+    Just DRFail -> putStrLn "resp1 failed" >> return False
+    _ -> putStrLn "recv resp1 failed" >> return False
+-- }}}
+-- clientNoRecv {{{
+clientNoRecv :: (Serialize r) => r -> AHandler Bool
+clientNoRecv req remoteH = do
+  putObject remoteH req
+  (mbResp1 :: Maybe DResp) <- getObject remoteH
+  case mbResp1 of
+    Just DROkay -> return True
+    Just DRFail -> putStrLn "resp failed" >> return False
+    _ -> putStrLn "recv resp failed" >> return False
+-- }}}
+-- clientRecvA {{{
+clientRecvA :: (Serialize r, Serialize a) => r -> AHandler (Maybe a)
+clientRecvA req remoteH = do
+  putObject remoteH $ req
+  (mbResp1 :: Maybe DResp) <- getObject remoteH
+  case mbResp1 of
+    Just DROkay -> do
+      (mbA :: Maybe a) <- getObject remoteH
+      case mbA of
+        Just _ -> do
+          (mbResp2 :: Maybe DResp) <- getObject remoteH
+          case mbResp2 of
+            Just DROkay -> return mbA
+            Just DRFail -> putStrLn "resp2 failed" >> return Nothing
+            _ -> putStrLn "recv resp2 failed" >> return Nothing
+        _ -> putStrLn "get A failed" >> return Nothing
+    Just DRFail -> putStrLn "resp1 failed" >> return Nothing
+    _ -> putStrLn "get resp1 failed" >> return Nothing
+-- }}}
 -- }}}
 
 -- with ZK {{{
 -- forkChildrenWatcher {{{
 forkChildrenWatcher :: ZKInfo -> String -> ([String] -> IO a) -> IO Bool
 forkChildrenWatcher zkinfo path action = do
-  forkWatcher zkinfo path rewatcher action
+  forkWatcher zkinfo rewatcher action
   where
     rewatcher zh = maybe [] id <$> Zoo.getChildrenSafe zh path Zoo.Watch
 -- }}}
 -- forkValueWatcher {{{
 forkValueWatcher :: ZKInfo -> String -> (Maybe BS.ByteString -> IO a) -> IO Bool
 forkValueWatcher zkinfo path action = do
-  forkWatcher zkinfo path rewatcher action
+  forkWatcher zkinfo rewatcher action
   where
     rewatcher zh = maybe Nothing fst <$> Zoo.getSafe zh path Zoo.Watch
 -- }}}
 -- forkWatcher {{{
-forkWatcher :: ZKInfo -> String -> (Zoo.ZHandle -> IO a) -> (a -> IO b) -> IO Bool
-forkWatcher (ZKInfo hostport) path rewatcher action = do
+forkWatcher :: ZKInfo -> (Zoo.ZHandle -> IO a) -> (a -> IO b) -> IO Bool
+forkWatcher (ZKInfo hostport) rewatcher action = do
   mbzh <- Zoo.initSafe hostport Nothing 100000
   case mbzh of
     Just zh -> do
@@ -323,7 +373,7 @@ forkWatcher (ZKInfo hostport) path rewatcher action = do
       return True
     _ -> return False
   where
-    watcher mvar zh _ _ path = do
+    watcher mvar zh _ _ _ = do
       putStrLn "get event"
       putMVar mvar zh
     handler mvar = do

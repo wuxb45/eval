@@ -11,7 +11,7 @@
 
 -- module export {{{
 module Eval.Storage (
-  DSConfig, DSReq(..), CheckSum,
+  DStorConfig, DSReq(..), CheckSum,
   DSNode(..), DSDirInfo, DSFile(..), DSData,
   checkSumBS, checkSumBSL, checkSumFile, checkSumDSPath,
   uniqueName, openBinBufFile, getFileSize,
@@ -24,6 +24,7 @@ module Eval.Storage (
   clientGetSum, clientVerify, clientBackup,
   clientCmdH,
   listOnlineStorage,
+  runSimpleServer, runClientREPL,
   ) where
 -- }}}
 
@@ -50,9 +51,10 @@ import Text.Printf (printf)
 import Data.Either (Either(..))
 import System.IO (Handle, withFile, IOMode(..), withBinaryFile,
                   putStrLn, BufferMode(..), hSetBuffering,
-                  openBinaryFile, hClose)
+                  openBinaryFile, hClose, hFlush, stdout, getLine)
 import Data.Tuple (swap,)
-import Data.List (foldl', concatMap, map, filter,)
+import Data.List (foldl', concatMap, map, filter, all, elem, (!!),
+                  zip, words, length,)
 import System.IO.Unsafe (unsafePerformIO)
 import System.FilePath (FilePath, (</>),)
 import System.Directory (removeFile, createDirectoryIfMissing)
@@ -67,19 +69,21 @@ import System.CPUTime.Rdtsc (rdtsc)
 ------
 import Eval.DServ (AHandler, IOHandler, DService(..),
                    ZKInfo(..), DServerInfo(..),
+                   commonInitial, forkServer, waitCloseSignal,
                    aHandler, ioaHandler, putObject, getObject,
                    listServer, accessServer,
-                   DResp(..), respOK, respFail,)
+                   DResp(..), respOK, respFail,
+                   clientTwoStage, clientRecvA, clientNoRecv,)
 -- }}}
 
 -- data {{{
--- DSConfig {{{
-data DSConfig = DSConfig
+-- DStorConfig {{{
+data DStorConfig = DStorConfig
   { confMetaData :: FilePath,
     confRootPath :: FilePath }
     --confHost       :: String }
   deriving (Show, Generic)
-instance Serialize DSConfig where
+instance Serialize DStorConfig where
 -- }}}
 -- CheckSum {{{
 type CheckSum = (Integer, String)
@@ -110,7 +114,7 @@ type DSData = BS.ByteString
 data DSNode = DSNode
   { nodeFileM   :: MVar (Map.Map String DSFile),
     nodeCacheM  :: RWVar.RWVar (Map.Map String DSData),
-    nodeConfig  :: DSConfig }
+    nodeConfig  :: DStorConfig }
 --type DSNodeStatic = Map.Map String DSFile
 -- }}}
 -- DSDirInfo {{{
@@ -119,8 +123,8 @@ type DSDirInfo = Map.Map String CheckSum
 -- DSReq {{{
 -- req -> resp -> OP
 data DSReq
-  = DSRPutFile    String Integer
-  | DSRPutCache   String Integer
+  = DSRPutFile    String CheckSum
+  | DSRPutCache   String CheckSum
   | DSRGetFile    String
   | DSRGetCache   String
   | DSRDelFile    String
@@ -343,12 +347,12 @@ nodeRemoteReadCache node name remoteH = do
 -- }}}
 
 -- nodeRemoteWriteFile {{{
-nodeRemoteWriteFile :: DSNode -> String -> Integer -> Handle -> IO ()
-nodeRemoteWriteFile node name size remoteH = do
+nodeRemoteWriteFile :: DSNode -> String -> CheckSum -> Handle -> IO ()
+nodeRemoteWriteFile node name sum remoteH = do
   respOK remoteH
   nodeLocalDeleteCache node name
   nodeLocalDeleteFile node name
-  mbdsfile <- pipeToDSFile node size remoteH
+  mbdsfile <- pipeToDSFile node (fst sum) remoteH
   case mbdsfile of
     Just dsfile -> do
       modifyMVar_ (nodeFileM node) $ return . Map.insert name dsfile
@@ -357,11 +361,11 @@ nodeRemoteWriteFile node name size remoteH = do
 -- }}}
 
 -- nodeRemoteWriteCache {{{
-nodeRemoteWriteCache :: DSNode -> String -> Integer -> Handle -> IO ()
-nodeRemoteWriteCache node name size remoteH = do
+nodeRemoteWriteCache :: DSNode -> String -> CheckSum -> Handle -> IO ()
+nodeRemoteWriteCache node name sum remoteH = do
   respOK remoteH
   putStrLn "write cache started"
-  bs <- BS.hGet remoteH (fromIntegral size)
+  bs <- BS.hGet remoteH (fromIntegral $ fst sum)
   putStrLn "write cache finished"
   RWVar.modify_ (nodeCacheM node) $ return . Map.insert name bs
   respOK remoteH
@@ -453,8 +457,8 @@ nodeRemoteDup cache node name target remoteH = do
       case mbdsfile of
         Just dsfile -> do
           localH <- openDSFile node dsfile ReadMode
-          let size = fst $ dsCheckSum dsfile
-          mbok <- accessServer target (clientPutH cache name localH size)
+          let sum = dsCheckSum dsfile
+          mbok <- accessServer target (clientPutH cache name localH sum)
           case mbok of
             Just True -> respOK remoteH
             _ -> respFail remoteH
@@ -611,15 +615,15 @@ makeDSService path = do
 -- }}}
 
 -- config file {{{
-makeConf :: FilePath -> IO DSConfig
+makeConf :: FilePath -> IO DStorConfig
 makeConf path = do
   let rootdir = path ++ "/data"
   createDirectoryIfMissing True rootdir
-  return $ DSConfig (path ++ "/meta") rootdir
+  return $ DStorConfig (path ++ "/meta") rootdir
 -- }}}
 
 -- loadMetaNode {{{
-loadNodeMeta :: DSConfig -> IO DSNode
+loadNodeMeta :: DStorConfig -> IO DSNode
 loadNodeMeta conf = do
   mbmeta <- loader `catch` aHandler Nothing
   fileM <- case mbmeta of
@@ -650,14 +654,14 @@ handleReq node remoteH req = do
     (DSRGetCache name) ->
       respDo $ nodeRemoteReadCache node name remoteH
     -- Put
-    (DSRPutFile name len) -> do
+    (DSRPutFile name sum) -> do
       putStrLn $ "processing PutFile"
-      if len > 0x10000000
+      if fst sum > 0x10000000
       then respFail remoteH
-      else respDo $ nodeRemoteWriteFile node name len remoteH
-    (DSRPutCache name len) -> if len > 0x10000000
+      else respDo $ nodeRemoteWriteFile node name sum remoteH
+    (DSRPutCache name sum) -> if fst sum > 0x10000000
       then respFail remoteH
-      else respDo $ nodeRemoteWriteCache node name len remoteH
+      else respDo $ nodeRemoteWriteCache node name sum remoteH
     -- List
     (DSRListFile) ->
       respDo $ nodeRemoteListFile node remoteH
@@ -704,33 +708,13 @@ closeStorage h = do
 
 -- Storage Client {{{
 
--- clientTwoStage {{{
-clientTwoStage :: DSReq -> AHandler Bool -> AHandler Bool
-clientTwoStage req h remoteH = do
-  putObject remoteH req
-  (mbResp1 :: Maybe DResp) <- getObject remoteH
-  case mbResp1 of
-    Just DROkay -> do
-      ok <- h remoteH `catch` aHandler False
-      case ok of
-        True -> do
-          (mbResp2 :: Maybe DResp) <- getObject remoteH
-          case mbResp2 of
-            Just DROkay -> return True
-            Just DRFail -> putStrLn "resp2 failed" >> return False
-            _ -> putStrLn "recv resp2 failed" >> return False
-        False -> putStrLn "the work failed" >> return False
-    Just DRFail -> putStrLn "resp1 failed" >> return False
-    _ -> putStrLn "recv resp1 failed" >> return False
--- }}}
-
 -- clientPutFile {{{
 clientPutFile :: Bool -> String -> FilePath -> AHandler Bool
 clientPutFile cache name filepath remoteH = do
-  size <- getFileSize filepath
-  clientTwoStage (req size) putData remoteH
+  sum <- checkSumFile filepath
+  clientTwoStage (req sum) putData remoteH
   where
-    req size = (if cache then DSRPutCache else DSRPutFile) name size
+    req sum = (if cache then DSRPutCache else DSRPutFile) name sum
     putData rH = do
       openBinBufFile filepath ReadMode >>= flip pipeAll rH
       return True
@@ -741,18 +725,18 @@ clientPutBS :: Bool -> String -> BS.ByteString -> AHandler Bool
 clientPutBS cache name bs remoteH = do
   clientTwoStage req putData remoteH
   where
-    size = toInteger $ BS.length bs
-    req = (if cache then DSRPutCache else DSRPutFile) name size
+    sum = checkSumBS bs
+    req = (if cache then DSRPutCache else DSRPutFile) name sum
     putData rH = BS.hPut rH bs >> return True
 -- }}}
 
 -- clientPutH {{{
-clientPutH :: Bool -> String -> Handle -> Integer -> AHandler Bool
-clientPutH cache name from size remoteH = do
+clientPutH :: Bool -> String -> Handle -> CheckSum -> AHandler Bool
+clientPutH cache name from sum remoteH = do
   clientTwoStage req pipeData remoteH
   where
-    req = (if cache then DSRPutCache else DSRPutFile) name size
-    pipeData rH = pipeSome size from rH >> return True
+    req = (if cache then DSRPutCache else DSRPutFile) name sum
+    pipeData rH = pipeSome (fst sum) from rH >> return True
 -- }}}
 
 -- clientGetFile {{{
@@ -769,37 +753,6 @@ clientGetFile cache name localpath remoteH = do
           pipeSome size rH localH
           return True
         _ -> return False
--- }}}
-
--- clientNoRecv {{{
-clientNoRecv :: DSReq -> AHandler Bool
-clientNoRecv req remoteH = do
-  putObject remoteH req
-  (mbResp1 :: Maybe DResp) <- getObject remoteH
-  case mbResp1 of
-    Just DROkay -> return True
-    Just DRFail -> putStrLn "resp failed" >> return False
-    _ -> putStrLn "recv resp failed" >> return False
--- }}}
-
--- clientRecvA {{{
-clientRecvA :: Serialize a => DSReq -> AHandler (Maybe a)
-clientRecvA req remoteH = do
-  putObject remoteH $ req
-  (mbResp1 :: Maybe DResp) <- getObject remoteH
-  case mbResp1 of
-    Just DROkay -> do
-      (mbA :: Maybe a) <- getObject remoteH
-      case mbA of
-        Just _ -> do
-          (mbResp2 :: Maybe DResp) <- getObject remoteH
-          case mbResp2 of
-            Just DROkay -> return mbA
-            Just DRFail -> putStrLn "resp2 failed" >> return Nothing
-            _ -> putStrLn "recv resp2 failed" >> return Nothing
-        _ -> putStrLn "get A failed" >> return Nothing
-    Just DRFail -> putStrLn "resp1 failed" >> return Nothing
-    _ -> putStrLn "get resp1 failed" >> return Nothing
 -- }}}
 
 -- client* with name {{{
@@ -841,10 +794,10 @@ clientVerify name mbchecksum remoteH = do
 -- }}}
 
 -- clientGetSum {{{
-clientGetSum :: String -> AHandler [String]
+clientGetSum :: String -> AHandler CheckSum
 clientGetSum name remoteH = do
   (mbsum :: Maybe CheckSum) <- clientRecvA (DSRGetSum name) remoteH
-  return $ maybe [] (\(a,b) -> [show a, show b]) mbsum
+  return $ maybe (0,"") id mbsum
 -- }}}
 
 -- clientDup {{{
@@ -855,6 +808,7 @@ clientDup cache name target = do
 
 -- clientCmdH {{{
 clientCmdH :: [String] -> AHandler (Either Bool [String])
+-- Left
 clientCmdH ("put":name:filename:[]) =
   (Left <$>) . clientPutFile False name filename
 clientCmdH ("putc":name:filename:[]) =
@@ -867,20 +821,12 @@ clientCmdH ("del":name:[]) =
   (Left <$>) . clientDel False name
 clientCmdH ("delc":name:[]) =
   (Left <$>) . clientDel True name
-clientCmdH ("ls":[]) =
-  (Right . map show . Map.toList <$>) . clientList False
-clientCmdH ("lsc":[]) =
-  (Right . map show . Map.toList <$>) . clientList True
 clientCmdH ("freeze":name:[]) =
   (Left <$>) . clientFreeze name
 clientCmdH ("freeze":[]) =
   (Left <$>) . clientFreezeAll
 clientCmdH ("backup":[]) =
   (Left <$>) . clientBackup
-clientCmdH ("cachesize":[]) =
-  ((\s -> Right [show s]) <$>) . clientCacheSize
-clientCmdH ("getsum":name:[]) =
-  (Right <$>) . clientGetSum name
 clientCmdH ("verify":name:[]) =
   (Left <$>) . clientVerify name Nothing
 clientCmdH ("verify":name:size:sum:[]) =
@@ -893,6 +839,16 @@ clientCmdH ("dupc":name:tHost:tPort:[]) =
   (Left <$>) . clientDup True name serverinfo
   where
     serverinfo = DServerInfo tHost (read tPort) storageServiceType
+-- Right
+clientCmdH ("ls":[]) =
+  (Right . map show . Map.toList <$>) . clientList False
+clientCmdH ("lsc":[]) =
+  (Right . map show . Map.toList <$>) . clientList True
+clientCmdH ("cachesize":[]) =
+  (Right . return . show <$>) . clientCacheSize
+clientCmdH ("getsum":name:[]) =
+  (Right . return . show <$>) . clientGetSum name
+-- XX
 clientCmdH cmd =
   const $ (putStrLn $ "?: " ++ show cmd) >> (return $ Left False)
 -- }}}
@@ -906,6 +862,59 @@ listOnlineStorage zkinfo = do
     _ -> return []
   where
     isStorage (DServerInfo{..}) = dsiServType == storageServiceType
+-- }}}
+
+-- }}}
+
+-- user {{{
+
+-- runSimpleServer {{{
+runSimpleServer :: ZKInfo -> Integer -> FilePath -> IO ()
+runSimpleServer zkinfo port rootpath = do
+  commonInitial
+  service <- makeDSService rootpath
+  mbsd <- forkServer zkinfo service port
+  maybe (return ()) waitCloseSignal mbsd
+-- }}}
+
+-- runClientREPL {{{
+runClientREPL :: ZKInfo -> IO ()
+runClientREPL zkinfo = do
+  commonInitial
+  runLoopREPL zkinfo
+
+runLoopREPL :: ZKInfo -> IO ()
+runLoopREPL zkinfo = do
+  putStrLn $ "==============================================================="
+  putStrLn $ "==============================================================="
+  lst <- maybe [] id <$> listServer zkinfo
+  putStrLn $ "current server list (" ++ show (length lst) ++ ") :"
+  mapM_ (putStrLn . show) $ zip [(0 :: Integer) ..] lst
+  printf "DStorage > " >> hFlush stdout
+  cmd <- words <$> (getLine `catch` aHandler "quit")
+  case cmd of
+    ["quit"] -> putStrLn "bye!" >> hFlush stdout >> return ()
+    (ix:cmd') -> do
+      if ix == "*"
+      then mapM_ (\si -> accessAndPrint si cmd') lst
+      else do
+        if all (`elem` "0123456789") ix
+        then accessAndPrint (lst !! (read ix)) cmd'
+        else accessAndPrint (lst !! 0) cmd
+      runLoopREPL zkinfo
+    _ -> do
+      accessAndPrint (lst !! 0) cmd
+      runLoopREPL zkinfo
+-- }}}
+
+-- accessAndPrint {{{
+accessAndPrint :: DServerInfo -> [String] -> IO ()
+accessAndPrint si args = do
+  result <- accessServer si (clientCmdH args)
+  case result of
+    Just (Left ok) -> putStrLn $ "result: " ++ show ok
+    Just (Right lst) -> putStrLn "result list: " >> mapM_ putStrLn lst
+    _ -> putStrLn "accessServer failed"
 -- }}}
 
 -- }}}
