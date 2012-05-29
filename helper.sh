@@ -1,6 +1,6 @@
 #!/bin/bash
 
-xx=TestStorage
+xx=TestDSet
 syncbin ()
 {
   server=$1

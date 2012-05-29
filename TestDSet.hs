@@ -1,14 +1,14 @@
 import System.Environment
 import Eval.DServ
-import Eval.Storage
-import EVal.DSet
+import Eval.DSet
 
+zkinfo :: ZKInfo
 zkinfo = ZKInfo "dell:2181"
-
-
 
 main :: IO ()
 main = do
-  (n:f:_) <- getArgs
-  re <- uploadSingleton zkinfo n f
-  putStrLn $ show re
+  (a:_) <- getArgs
+  case a of
+    "server" -> runDSetSimpleServer zkinfo 7610 "/home/wuxb/tmp/dset"
+    "client" -> runDSetClientREPL zkinfo
+    _ -> putStrLn "??"

@@ -22,9 +22,8 @@ module Eval.Storage (
   clientList, clientDel,
   clientFreeze, clientFreezeAll, clientCacheSize,
   clientGetSum, clientVerify, clientBackup,
-  clientCmdH,
   listOnlineStorage,
-  runSimpleServer, runClientREPL,
+  runStorSimpleServer, runStorClientREPL,
   ) where
 -- }}}
 
@@ -526,7 +525,7 @@ nodeLocalCacheFile node name = do
 nodeLocalBackupMeta :: DSNode -> IO ()
 nodeLocalBackupMeta node = do
   filemap <- readMVar (nodeFileM node)
-  withFile (confMetaData (nodeConfig node)) WriteMode (flip putObject filemap)
+  withFile (confMetaData $ nodeConfig node) WriteMode (flip putObject filemap)
 -- }}}
 
 -- nodeLocalFreezeAll {{{
@@ -806,7 +805,10 @@ clientDup cache name target = do
   clientNoRecv $ (if cache then DSRDupCache else DSRDupFile) name target
 -- }}}
 
--- clientCmdH {{{
+-- clientStorCmdH {{{
+--clientStorCmdH :: [String] -> AHandler (Either Bool [String])
+--clientStorCmdH = clientCmdH
+
 clientCmdH :: [String] -> AHandler (Either Bool [String])
 -- Left
 clientCmdH ("put":name:filename:[]) =
@@ -869,8 +871,8 @@ listOnlineStorage zkinfo = do
 -- user {{{
 
 -- runSimpleServer {{{
-runSimpleServer :: ZKInfo -> Integer -> FilePath -> IO ()
-runSimpleServer zkinfo port rootpath = do
+runStorSimpleServer :: ZKInfo -> Integer -> FilePath -> IO ()
+runStorSimpleServer zkinfo port rootpath = do
   commonInitial
   service <- makeDSService rootpath
   mbsd <- forkServer zkinfo service port
@@ -878,8 +880,8 @@ runSimpleServer zkinfo port rootpath = do
 -- }}}
 
 -- runClientREPL {{{
-runClientREPL :: ZKInfo -> IO ()
-runClientREPL zkinfo = do
+runStorClientREPL :: ZKInfo -> IO ()
+runStorClientREPL zkinfo = do
   commonInitial
   runLoopREPL zkinfo
 

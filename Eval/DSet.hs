@@ -9,49 +9,32 @@ module Eval.DSet where
 -- }}}
 
 -- import {{{
-import qualified Data.Set as Set
 import qualified Data.Map as Map
 import qualified Data.Array as Arr
 import qualified Data.Traversable as Trav
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as BSL
-import qualified Crypto.Hash.SHA1 as SHA1 -- hackage: cryptohash
 import qualified Control.Concurrent.ReadWriteVar as RWVar
-import qualified Control.Concurrent.ReadWriteLock as RWL
 ------
 import Prelude (($), (.), (+), (>), (==), (++), (-), (/=), (||), (&&),
                 flip, Bool(..), compare, fromIntegral, Int,
                 IO, String, Show(..), Integer, id, toInteger,
                 const, read, snd, mod,)
-import Control.Applicative ((<$>), (<*>))
-import Control.Monad (Monad(..), mapM_, when, unless, void, mapM, join)
+import Control.Applicative ((<$>), )
+import Control.Monad (Monad(..), mapM, mapM_, join, sequence_, void,)
 import Control.Concurrent (MVar, readMVar, modifyMVar_, newMVar,
-                           withMVar, forkIO, modifyMVar,)
+                           modifyMVar, threadDelay, forkIO,)
 import Control.Exception (catch,)
-import Control.DeepSeq (deepseq)
-import Data.Set (Set)
 import Data.Array.IArray
-import Data.Map (Map)
-import Data.Word (Word64)
-import Data.Maybe (Maybe(..), maybe, isNothing)
-import Text.Printf (printf)
 import Data.Either (Either(..))
-import System.IO (Handle, withFile, IOMode(..), withBinaryFile,
-                  putStrLn, BufferMode(..), hSetBuffering,
-                  openBinaryFile, hClose)
-import Data.Tuple (swap,)
-import Data.List (foldl', concatMap, map, filter, zip, foldr, length, sum)
-import System.IO.Unsafe (unsafePerformIO)
-import System.FilePath (FilePath, (</>),)
-import System.Directory (removeFile, createDirectoryIfMissing)
-import System.Posix.Time (epochTime)
-import System.Posix.Files (getFileStatus, fileSize,)
-import System.Posix.Process (getProcessID)
-import System.Posix.Types (CPid(..))
-import Foreign.C.Types (CTime(..))
-import GHC.Generics (Generic)
+import Data.Map (Map)
+import Data.Maybe (Maybe(..), maybe, )
 import Data.Serialize (Serialize(..),)
-import System.CPUTime.Rdtsc (rdtsc)
+import System.IO (Handle, withFile, IOMode(..),
+                  getLine, putStrLn, hFlush, stdout,)
+import Data.List (map, filter, foldr, length, sum, words, repeat,)
+import System.FilePath (FilePath, )
+import System.Directory (createDirectoryIfMissing)
+import GHC.Generics (Generic)
+import Text.Printf (printf)
 ------
 import Eval.DServ
 import Eval.Storage
@@ -92,23 +75,19 @@ instance Serialize DSetReq where
 
 -- DSet {{{
 
+-- dsetBackup {{{
+dsetBackup :: DSetNode -> IO ()
+dsetBackup node = do
+  dsMap <- RWVar.with (dsetMetaMap node) return
+  pureMap <- Trav.mapM (flip RWVar.with return) dsMap
+  withFile (confMetaData $ dsetConfig node) WriteMode (flip putObject pureMap)
+-- }}}
+
 -- dsetLookup {{{
 dsetLookup :: DSetNode -> String -> IO DataSet
 dsetLookup node sname = do
   mbset <- RWVar.with (dsetMetaMap node) $ return . Map.lookup sname
   maybe (return Map.empty) (\s -> RWVar.with s return) mbset
--- }}}
-
--- dsetAddElem {{{
---dsetAddElem :: DSetNode -> String -> String -> CheckSum -> IO ()
---dsetAddElem node sname ename sum = do
---  mbset <- RWVar.with (dsetMetaMap node) $ return . Map.lookup sname
---  case mbset of
---    Just set -> do
---      RWVar.modify_ set $ return . Map.insert ename sum
---    _ -> do
---      set <- RWVar.new $ Map.singleton ename sum
---      RWVar.modify_ (dsetMetaMap node) $ return . Map.insert sname set
 -- }}}
 
 -- dsetAddElemN {{{
@@ -122,6 +101,7 @@ dsetAddElemN node sname pairs = do
     _ -> do
       set <- RWVar.new newMap
       RWVar.modify_ (dsetMetaMap node) $ return . Map.insert sname set
+  dsetBackup node
 -- }}}
 
 -- dsetDelElem {{{
@@ -132,6 +112,7 @@ dsetDelElem node sname ename = do
     Just set -> do
       RWVar.modify_ set $ return . Map.delete ename
     _ -> return ()
+  dsetBackup node
 -- }}}
 
 -- dsetDelElemN {{{
@@ -142,12 +123,14 @@ dsetDelElemN node sname enames = do
     Just set -> do
       RWVar.modify_ set $ return . flip (foldr Map.delete) enames
     _ -> return ()
+  dsetBackup node
 -- }}}
 
 -- dsetDelAll {{{
 dsetDelAll :: DSetNode -> String -> IO ()
 dsetDelAll node sname = do
   RWVar.modify_ (dsetMetaMap node) $ return . Map.delete sname
+  dsetBackup node
 -- }}}
 
 -- }}}
@@ -176,6 +159,7 @@ pullDataInfo si = do
 updateStorageNode :: DSetNode -> IO ()
 updateStorageNode node = do
   storList <- pullAllDataInfo node
+  putStrLn $ "update current storage: " ++ (show $ length storList)
   let maxix = length storList - 1
   modifyMVar_ (dsetStorage node) $
     return . const (listArray (0, maxix) storList)
@@ -193,14 +177,14 @@ pickStorageR node ename = do
   let (_, maxix) = bounds arr
   let m = maxix + 1
   r <- rollDice node
-  lookupNStep m m r ename arr
+  lookupNStep m m r arr
   where
-    lookupNStep 0 _ _ _ _ = return Nothing
-    lookupNStep countdown m r ename arr = do
+    lookupNStep 0 _ _ _ = return Nothing
+    lookupNStep countdown m r arr = do
       let (si, fm, cm) = arr ! (r `mod` m)
       if Map.member ename fm || Map.member ename cm
       then return $ Just si
-      else lookupNStep (countdown - 1) m (r + 1) ename arr
+      else lookupNStep (countdown - 1) m (r + 1) arr
 -- }}}
 
 -- pickStorageW {{{
@@ -240,17 +224,17 @@ dsetServiceType = "DSet"
 -- loadMetaDataSet {{{
 loadMetaDataSet :: DSetConfig -> IO DSetNode
 loadMetaDataSet conf = do
-  mbdataset <- loader `catch` aHandler Nothing
-  datasetVar <- case mbdataset of
-    Just dataset -> do
-      rwvar <- Trav.mapM RWVar.new dataset
+  mbdsMap <- loader `catch` aHandler Nothing
+  dsMapMVar <- case mbdsMap of
+    Just dsMap -> do
+      rwvar <- Trav.mapM RWVar.new dsMap
       RWVar.new rwvar
     _ -> do
       putStrLn "warning: DFS meta not loaded from file."
       RWVar.new Map.empty
-  nodeMap <- newMVar $ listArray (0,0) []
+  nodeMap <- newMVar $ listArray (0, (-1)) []
   sequ <- newMVar 0
-  return $ DSetNode datasetVar nodeMap sequ conf
+  return $ DSetNode dsMapMVar nodeMap sequ conf
   where
     loader = withFile (confMetaData conf) ReadMode getObject
 -- }}}
@@ -260,7 +244,19 @@ makeDSetService :: ZKInfo -> FilePath -> IO DService
 makeDSetService zkinfo rootpath = do
   conf <- makeConf zkinfo rootpath
   node <- loadMetaDataSet conf
+  startStorageMonitor node zkinfo
   return $ DService dsetServiceType (dsetHandler node) Nothing
+-- }}}
+
+-- startStorageMonitor {{{
+startStorageMonitor :: DSetNode -> ZKInfo -> IO ()
+startStorageMonitor node zkinfo = do
+  -- update on event
+  void $ forkChildrenWatcher zkinfo "/d" $ const updater
+  -- every 10 sec. 1,000,000 => 1 sec
+  void $ forkIO $ sequence_ $ repeat $ updater >> threadDelay 10000000
+  where
+    updater = updateStorageNode node
 -- }}}
 
 -- makeConf {{{
@@ -361,6 +357,25 @@ clientPickStorW :: AHandler (Maybe DServerInfo)
 clientPickStorW remoteH = do
   join <$> clientRecvA (DSetRPickStorW) remoteH
 -- }}}
+-- clientDSetCmd {{{
+clientDSetCmdH :: [String] -> AHandler (Either Bool [String])
+clientDSetCmdH = clientCmdH
+
+clientCmdH :: [String] -> AHandler (Either Bool [String])
+clientCmdH ("add1":sname:ename:len:chksum:[]) =
+  (Left <$>) . clientAddElemN sname [(ename, (read len, chksum))]
+clientCmdH ("del1":sname:ename:[]) =
+  (Left <$>) . clientDelElemN sname [ename]
+clientCmdH ("del":sname:[]) =
+  (Left <$>) . clientDelAll sname
+clientCmdH ("get":sname:[]) =
+  (Right . map show . maybe [] Map.toList <$>) . clientGetSet sname
+clientCmdH ("pickr":ename:[]) =
+  (Right . return . show <$>) . clientPickStorR ename
+clientCmdH ("pickw":[]) =
+  (Right . return . show <$>) .clientPickStorW
+clientCmdH _ = return . const (Right ["unknown command!"])
+-- }}}
 -- }}}
 
 -- DSet user {{{
@@ -378,8 +393,8 @@ lookupDSetServer zkinfo = do
 -- }}}
 
 -- uploadSingleton {{{
-uploadSingleton :: ZKInfo -> String -> FilePath -> AHandler Bool
-uploadSingleton zkinfo sname filepath remoteH = do
+uploadSingleton :: ZKInfo -> String -> FilePath -> IO Bool
+uploadSingleton zkinfo sname filepath = do
   mbDSet <- lookupDSetServer zkinfo
   case mbDSet of
     Just dset -> do
@@ -392,6 +407,48 @@ uploadSingleton zkinfo sname filepath remoteH = do
           fileOK <- accessServer stor (clientPutFile False elemname filepath)
           return $ (fileOK == Just True) && (metaOK == Just True)
         _ -> return False
+    _ -> return False
+-- }}}
+
+-- runSimpleServer {{{
+runDSetSimpleServer :: ZKInfo -> Integer -> FilePath -> IO ()
+runDSetSimpleServer zkinfo port rootpath = do
+  commonInitial
+  service <- makeDSetService zkinfo rootpath
+  mbsd <- forkServer zkinfo service port
+  maybe (return ()) waitCloseSignal mbsd
+-- }}}
+
+-- runClientREPL {{{
+runDSetClientREPL :: ZKInfo -> IO ()
+runDSetClientREPL zkinfo = do
+  commonInitial
+  mbserver <- lookupDSetServer zkinfo
+  case mbserver of
+    Just server -> runLoopREPL server
+    _ -> putStrLn "no DSet server"
+
+runLoopREPL :: DServerInfo -> IO ()
+runLoopREPL server = do
+  putStrLn $ "==============================================================="
+  putStrLn $ "==============================================================="
+  printf "DSet > " >> hFlush stdout
+  cmd <- words <$> (getLine `catch` aHandler "quit")
+  if cmd == ["quit"]
+  then putStrLn "bye!" >> hFlush stdout >> return ()
+  else do
+    accessAndPrint server cmd
+    runLoopREPL server
+-- }}}
+
+-- accessAndPrint {{{
+accessAndPrint :: DServerInfo -> [String] -> IO ()
+accessAndPrint si args = do
+  result <- accessServer si (clientCmdH args)
+  case result of
+    Just (Left ok) -> putStrLn $ "result: " ++ show ok
+    Just (Right lst) -> putStrLn "result list: " >> mapM_ putStrLn lst
+    _ -> putStrLn "accessServer failed"
 -- }}}
 
 -- }}}
