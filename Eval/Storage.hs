@@ -18,7 +18,7 @@ module Eval.Storage (
   pipeSome, pipeAll,
   makeDSService, storageServiceType,
   clientPutFile, clientPutBS, clientPutH,
-  clientGetFile,
+  clientGetFile, clientGetH,
   clientList, clientDel,
   clientFreeze, clientFreezeAll, clientCacheSize,
   clientGetSum, clientVerify, clientBackup,
@@ -35,7 +35,7 @@ import qualified Crypto.Hash.SHA1 as SHA1 -- hackage: cryptohash
 import qualified Control.Concurrent.ReadWriteVar as RWVar
 import qualified Control.Concurrent.ReadWriteLock as RWL
 ------
-import Prelude (($), (.), (+), (>), (==), (++), (-), (/=),
+import Prelude (($), (.), (+), (>), (==), (++), (-), (/=), (>=), (||),
                 flip, Bool(..), compare, fromIntegral, fst,
                 IO, String, Show(..), Integer, id, toInteger, Int,
                 const, read)
@@ -48,12 +48,12 @@ import Control.DeepSeq (deepseq)
 import Data.Maybe (Maybe(..), maybe, isNothing)
 import Text.Printf (printf)
 import Data.Either (Either(..))
-import System.IO (Handle, withFile, IOMode(..), withBinaryFile,
+import System.IO (Handle, withFile, IOMode(..),
                   putStrLn, BufferMode(..), hSetBuffering,
                   openBinaryFile, hClose, hFlush, stdout, getLine)
 import Data.Tuple (swap,)
 import Data.List (foldl', concatMap, map, filter, all, elem, (!!),
-                  zip, words, length,)
+                  zip, words, length, head,)
 import System.IO.Unsafe (unsafePerformIO)
 import System.FilePath (FilePath, (</>),)
 import System.Directory (removeFile, createDirectoryIfMissing)
@@ -156,13 +156,13 @@ checkSumBSL bs = sum `deepseq` (fromIntegral (BSL.length bs), sum)
 
 checkSumFile :: FilePath -> IO CheckSum
 checkSumFile path = do
-  bs <- withBinaryFile path ReadMode BSL.hGetContents
-  return $ checkSumBSL bs
+  h <- openBinBufFile path ReadMode
+  checkSumBSL <$> BSL.hGetContents h
 
 checkSumDSPath :: DSNode -> FilePath -> IO CheckSum
 checkSumDSPath node path = do
   h <- openLocalFile node path ReadMode
-  checkSumBSL <$> BSL.hGetContents h
+  checkSumBS <$> BS.hGetContents h
 
 verifyDSFile :: DSNode -> DSFile -> Maybe CheckSum -> IO Bool
 verifyDSFile node dsfile mbsum = do
@@ -351,7 +351,9 @@ nodeRemoteWriteFile node name sum remoteH = do
   respOK remoteH
   nodeLocalDeleteCache node name
   nodeLocalDeleteFile node name
+  putStrLn "start pipe to DSFile"
   mbdsfile <- pipeToDSFile node (fst sum) remoteH
+  putStrLn "finish pipe to DSFile"
   case mbdsfile of
     Just dsfile -> do
       modifyMVar_ (nodeFileM node) $ return . Map.insert name dsfile
@@ -710,12 +712,16 @@ closeStorage h = do
 -- clientPutFile {{{
 clientPutFile :: Bool -> String -> FilePath -> AHandler Bool
 clientPutFile cache name filepath remoteH = do
-  sum <- checkSumFile filepath
-  clientTwoStage (req sum) putData remoteH
+  putStrLn $ "start get chksum:"
+  chksum <- checkSumFile filepath
+  putStrLn $ "sum:" ++ show chksum
+  clientTwoStage (req chksum) putData remoteH
   where
-    req sum = (if cache then DSRPutCache else DSRPutFile) name sum
+    req chksum = (if cache then DSRPutCache else DSRPutFile) name chksum
     putData rH = do
+      putStrLn "start send file content"
       openBinBufFile filepath ReadMode >>= flip pipeAll rH
+      putStrLn "finish send file content"
       return True
 -- }}}
 
@@ -745,10 +751,25 @@ clientGetFile cache name localpath remoteH = do
   where
     req = (if cache then DSRGetCache else DSRGetFile) name
     getFile rH = do
-      (mbSize :: Maybe Integer) <- getObject remoteH
+      (mbSize :: Maybe Integer) <- getObject rH
       case mbSize of
         Just size -> do
           localH <- openBinBufFile localpath WriteMode
+          pipeSome size rH localH
+          return True
+        _ -> return False
+-- }}}
+
+-- clientGetH {{{
+clientGetH :: Bool -> String -> Handle -> AHandler Bool
+clientGetH cache name localH remoteH = do
+  clientTwoStage req getH remoteH
+  where
+    req = (if cache then DSRGetCache else DSRGetFile) name
+    getH rH = do
+      (mbSize :: Maybe Integer) <- getObject rH
+      case mbSize of
+        Just size -> do
           pipeSome size rH localH
           return True
         _ -> return False
@@ -781,33 +802,30 @@ clientList cache remoteH = do
 -- clientCacheSize {{{
 clientCacheSize :: AHandler Integer
 clientCacheSize remoteH = do
-  mbsize <- clientRecvA DSRCacheSize remoteH
-  return $ maybe 0 id mbsize
+  maybe 0 id <$> clientRecvA DSRCacheSize remoteH
 -- }}}
 
 -- clientVerify {{{
 clientVerify :: String -> Maybe CheckSum -> AHandler Bool
 clientVerify name mbchecksum remoteH = do
-  mbok <- clientRecvA (DSRVerify name mbchecksum) remoteH
-  return $ maybe False id mbok
+  maybe False id <$> clientRecvA (DSRVerify name mbchecksum) remoteH
 -- }}}
 
 -- clientGetSum {{{
 clientGetSum :: String -> AHandler CheckSum
 clientGetSum name remoteH = do
-  (mbsum :: Maybe CheckSum) <- clientRecvA (DSRGetSum name) remoteH
-  return $ maybe (0,"") id mbsum
+  maybe (0,"") id <$> clientRecvA (DSRGetSum name) remoteH
 -- }}}
 
 -- clientDup {{{
 clientDup :: Bool -> String -> DServerInfo -> AHandler Bool
 clientDup cache name target = do
-  clientNoRecv $ (if cache then DSRDupCache else DSRDupFile) name target
+  clientTwoStage req (const $ return True)
+  where
+    req = (if cache then DSRDupCache else DSRDupFile) name target
 -- }}}
 
--- clientStorCmdH {{{
---clientStorCmdH :: [String] -> AHandler (Either Bool [String])
---clientStorCmdH = clientCmdH
+-- clientCmdH {{{
 
 clientCmdH :: [String] -> AHandler (Either Bool [String])
 -- Left
@@ -863,7 +881,7 @@ listOnlineStorage zkinfo = do
     Just lst -> return $ filter isStorage lst
     _ -> return []
   where
-    isStorage (DServerInfo{..}) = dsiServType == storageServiceType
+    isStorage dsi = dsiServType dsi == storageServiceType
 -- }}}
 
 -- }}}
@@ -883,30 +901,61 @@ runStorSimpleServer zkinfo port rootpath = do
 runStorClientREPL :: ZKInfo -> IO ()
 runStorClientREPL zkinfo = do
   commonInitial
-  runLoopREPL zkinfo
+  lst <- listOnlineStorage zkinfo
+  runLoopREPL zkinfo lst
 
-runLoopREPL :: ZKInfo -> IO ()
-runLoopREPL zkinfo = do
+runLoopREPL :: ZKInfo -> [DServerInfo] -> IO ()
+runLoopREPL zkinfo lst = do
   putStrLn $ "==============================================================="
   putStrLn $ "==============================================================="
-  lst <- maybe [] id <$> listServer zkinfo
+  --lst <- listOnlineStorage zkinfo
   putStrLn $ "current server list (" ++ show (length lst) ++ ") :"
   mapM_ (putStrLn . show) $ zip [(0 :: Integer) ..] lst
   printf "DStorage > " >> hFlush stdout
   cmd <- words <$> (getLine `catch` aHandler "quit")
-  case cmd of
-    ["quit"] -> putStrLn "bye!" >> hFlush stdout >> return ()
-    (ix:cmd') -> do
-      if ix == "*"
-      then mapM_ (\si -> accessAndPrint si cmd') lst
-      else do
-        if all (`elem` "0123456789") ix
-        then accessAndPrint (lst !! (read ix)) cmd'
-        else accessAndPrint (lst !! 0) cmd
-      runLoopREPL zkinfo
-    _ -> do
-      accessAndPrint (lst !! 0) cmd
-      runLoopREPL zkinfo
+  putStrLn $ "##cmd: " ++ show cmd
+  if cmd == ["quit"]
+  then putStrLn "bye!" >> hFlush stdout >> return ()
+  else do
+    if cmd == ["refresh"]
+    then do
+      lst' <- listOnlineStorage zkinfo
+      runLoopREPL zkinfo lst'
+    else do
+      case cmd of
+        ("idup":cmd') -> runXDup False lst cmd'
+        ("idupc":cmd') -> runXDup True lst cmd'
+        ("*":cmd') -> mapM_ (\si -> accessAndPrint si cmd') lst
+        (ixstr:cmd') -> do
+          if all (`elem` "0123456789") ixstr
+          then do
+            let ix = read ixstr
+            if ix >= length lst
+            then putStrLn "invalid server ix"
+            else accessAndPrint (lst !! ix) cmd'
+          else do
+            runNoIX cmd
+        _ -> do
+          runNoIX cmd
+      runLoopREPL zkinfo lst
+  where
+    runNoIX cmd = do
+      if length lst == 0
+      then putStrLn "no server"
+      else accessAndPrint (head lst) cmd
+-- }}}
+
+-- runXDup {{{
+runXDup :: Bool -> [DServerInfo] -> [String] -> IO ()
+runXDup cache lst (name:fromIxStr:toIxStr:[]) = do
+  let fromIx = read fromIxStr
+  let toIx = read toIxStr
+  if fromIx >= length lst || toIx >= length lst
+  then putStrLn "idup, Ix out of range"
+  else do
+    result <- accessServer (lst !! fromIx) $ clientDup cache name (lst !! toIx)
+    putStrLn $ "dup: " ++ show result
+runXDup _ _ _ = putStrLn "runXDup, wrong args"
 -- }}}
 
 -- accessAndPrint {{{

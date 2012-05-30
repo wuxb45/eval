@@ -1,12 +1,17 @@
 #!/bin/bash
 
-xx=TestDSet
+if [[ -n $2 ]]; then
+  xx=$2
+else
+  xx=TestStorage
+fi
+
 syncbin ()
 {
   server=$1
   ssh ${server} killall -q "${xx}"
   echo "sync to ${server}"
-  rsync -z "${xx}" "${server}:~/program/usr/bin/${xx}"
+  rsync -z --progress "${xx}" "${server}:~/program/usr/bin/${xx}"
 }
 
 case "$1" in

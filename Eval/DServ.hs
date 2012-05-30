@@ -70,9 +70,10 @@ data DServerInfo = DServerInfo
   { dsiHostName   :: HostName,
     dsiPortNumber :: Integer,
     dsiServType   :: String
-  } deriving (Show, Generic, Eq, Ord)
+  } deriving (Generic, Eq, Ord)
 instance Serialize DServerInfo where
-
+instance Show DServerInfo where
+  show (DServerInfo h p t) = printf "#DServerInfo: [ %s:%d ] (%s)" h p t
 -- }}}
 -- DServerData: on local process. {{{
 data DServerData = DServerData
@@ -296,6 +297,7 @@ accessServer dsi handler = (Just <$> runner) `catch` exHandler
 -- }}}
 
 -- clientTwoStage {{{
+-- two OK
 clientTwoStage :: (Serialize r) => r -> AHandler Bool -> AHandler Bool
 clientTwoStage req h remoteH = do
   putObject remoteH req
@@ -315,6 +317,7 @@ clientTwoStage req h remoteH = do
     _ -> putStrLn "recv resp1 failed" >> return False
 -- }}}
 -- clientNoRecv {{{
+-- only 1 OK
 clientNoRecv :: (Serialize r) => r -> AHandler Bool
 clientNoRecv req remoteH = do
   putObject remoteH req
@@ -325,6 +328,7 @@ clientNoRecv req remoteH = do
     _ -> putStrLn "recv resp failed" >> return False
 -- }}}
 -- clientRecvA {{{
+-- two OK
 clientRecvA :: (Serialize r, Serialize a) => r -> AHandler (Maybe a)
 clientRecvA req remoteH = do
   putObject remoteH $ req
