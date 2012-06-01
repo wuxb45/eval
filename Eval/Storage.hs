@@ -864,7 +864,7 @@ clientCmdH ("ls":[]) =
   (Right . map show . Map.toList <$>) . clientList False
 clientCmdH ("lsc":[]) =
   (Right . map show . Map.toList <$>) . clientList True
-clientCmdH ("cachesize":[]) =
+clientCmdH ("cache":[]) =
   (Right . return . show <$>) . clientCacheSize
 clientCmdH ("getsum":name:[]) =
   (Right . return . show <$>) . clientGetSum name
@@ -897,6 +897,36 @@ runStorSimpleServer zkinfo port rootpath = do
   maybe (return ()) waitCloseSignal mbsd
 -- }}}
 
+-- printHelp {{{
+printHelp :: IO ()
+printHelp = mapM_ putStrLn $
+  [ "> quit"
+  , "> refresh"
+  , "> idup    <name> <from-ix> <to-ix>"
+  , "> idupc   <name> <from-ix> <to-ix>"
+  , "> * <rest-cmd>"
+  , "> 0 <rest-cmd>"
+  , "==========="
+  , "rest-cmd::"
+  , "> put     <name> <filename>"
+  , "> putc    <name> <filename>"
+  , "> get     <name> <filename>"
+  , "> getc    <name> <filename>"
+  , "> del     <name>"
+  , "> delc    <name>"
+  , "> freeze  <name>"
+  , "> freeze"
+  , "> backup"
+  , "> verify  <name>"
+  , "> verify  <name> <size> <checksum>"
+  , "> dup     <name> <target-hostname> <target-port>"
+  , "> dupc    <name> <target-hostname> <target-port>"
+  , "> ls"
+  , "> lsc"
+  , "> cache"
+  , "> getsum  <name>" ]
+-- }}}
+
 -- runClientREPL {{{
 runStorClientREPL :: ZKInfo -> IO ()
 runStorClientREPL zkinfo = do
@@ -923,6 +953,7 @@ runLoopREPL zkinfo lst = do
       runLoopREPL zkinfo lst'
     else do
       case cmd of
+        ("h":[]) -> printHelp
         ("idup":cmd') -> runXDup False lst cmd'
         ("idupc":cmd') -> runXDup True lst cmd'
         ("*":cmd') -> mapM_ (\si -> accessAndPrint si cmd') lst

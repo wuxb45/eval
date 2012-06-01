@@ -13,6 +13,7 @@ module Eval.DServ (
   DServerInfo(..), DService(..), DServerData(..),
   ZKInfo(..), DResp(..),
   respOK, respFail,
+  findDefaultZK,
   commonInitial,
   forkServer, closeServer,
   waitCloseCmd, waitCloseSignal,
@@ -43,7 +44,7 @@ import Data.Serialize (Serialize(..), encode, decode, encodeLazy, decodeLazy, )
 import Data.Int (Int)
 import Data.Bool (Bool(..))
 import Data.IORef (IORef, newIORef, writeIORef, readIORef,)
-import Data.List ((++), map, tail, break,)
+import Data.List ((++), map, tail, break, head, lines)
 import Data.Maybe (Maybe(..), maybe,)
 import Data.Typeable (Typeable(..),)
 import GHC.Generics (Generic)
@@ -51,7 +52,9 @@ import Network (HostName, PortID(..), Socket, connectTo,
                 accept, listenOn, sClose,)
 import Network.Socket(getNameInfo, SockAddr(..),)
 import System.IO (IO, hGetLine, hFlush, hPutStrLn, Handle, hClose, getLine,
-                  hSetBuffering, BufferMode(..), putStrLn, hWaitForInput, stdin)
+                  hSetBuffering, BufferMode(..), putStrLn, hWaitForInput,
+                  readFile, stdin)
+import System.Directory (getHomeDirectory,)
 import Text.Read (read)
 import Text.Show (Show(..))
 import Text.Printf (printf)
@@ -110,6 +113,12 @@ instance Serialize DResp where
 -- }}}
 
 -- common {{{
+-- findDefaultZK {{{
+findDefaultZK :: IO (Maybe ZKInfo)
+findDefaultZK = do
+  rcfile <- ("/.zkrc" ++ ) <$> getHomeDirectory
+  (Just . ZKInfo . head . lines <$> readFile rcfile) `catch` aHandler Nothing
+-- }}}
 -- commonInitial {{{
 commonInitial :: IO ()
 commonInitial = do

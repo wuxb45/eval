@@ -1,4 +1,5 @@
 -- Copyright 2012 Wu Xingbo
+
 -- head {{{
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DeriveGeneric #-}
@@ -588,6 +589,23 @@ runDSetSimpleServer zkinfo port rootpath = do
   maybe (return ()) waitCloseSignal mbsd
 -- }}}
 
+-- printHelp {{{
+printHelp :: IO ()
+printHelp = mapM_ putStrLn $
+  [ "> put1   <sname> <filename>"
+  , "> put    <sname> <filename>"
+  , "> get    <sname> <filename>"
+  , "> add1   <sname> <ename> <length> <checksum>"
+  , "> del1   <sname> <ename>"
+  , "> del    <sname>"
+  , "> get    <sname>"
+  , "> pickr  <ename>"
+  , "> pickw"
+  , "> ls"
+  , "> lf"
+  , "> lc"]
+-- }}}
+
 -- runClientREPL {{{
 runDSetClientREPL :: ZKInfo -> IO ()
 runDSetClientREPL zkinfo = do
@@ -607,6 +625,7 @@ runLoopREPL zkinfo server = do
   then putStrLn "bye!" >> hFlush stdout >> return ()
   else do
     case cmd of
+      ("h":[]) -> printHelp
       ("put1":sname:filename:[]) -> do
         ok <- putSingleton server sname filename
         putStrLn $ "upload single: " ++ show ok
