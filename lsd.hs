@@ -4,6 +4,10 @@ import Control.Applicative
 main :: IO ()
 main = do
   commonInitial
-  lst <- maybe [] id <$> listServer (ZKInfo "dell:2181")
-  mapM_ (putStrLn . show) lst
-  
+  mbzk <- findDefaultZK
+  case mbzk of
+    Just zkinfo -> do
+      lst <- maybe [] id <$> listServer zkinfo
+      putStrLn $ "online service (" ++ show (length lst) ++ "):"
+      mapM_ (putStrLn . show) lst
+    _ -> putStrLn "no zookeeper info, check ~/.zkrc"

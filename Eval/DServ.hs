@@ -116,7 +116,7 @@ instance Serialize DResp where
 -- findDefaultZK {{{
 findDefaultZK :: IO (Maybe ZKInfo)
 findDefaultZK = do
-  rcfile <- ("/.zkrc" ++ ) <$> getHomeDirectory
+  rcfile <- (++ "/.zkrc") <$> getHomeDirectory
   (Just . ZKInfo . head . lines <$> readFile rcfile) `catch` aHandler Nothing
 -- }}}
 -- commonInitial {{{
