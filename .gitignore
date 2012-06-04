@@ -4,3 +4,7 @@
 *.hc
 *.pyc
 *.swp
+dist
+cabal-dev
+*.chi
+*.chs.h
