@@ -3,26 +3,34 @@
 if [[ -n $2 ]]; then
   xx=$2
 else
-  xx=TestStorage
+  echo "usage: > ./helper b <target>"
+  echo "       > ./helper d <target>"
+  exit 0
+fi
+hostlist=
+ghcopts='--make -Wall -threaded -fforce-recomp'
+
+if [[ -e test/config ]]; then
+  . 'test/config'
 fi
 
 syncbin ()
 {
-  server=$1
-  ssh ${server} killall -q "${xx}"
-  echo "sync to ${server}"
-  rsync -z --progress "${xx}" "${server}:~/program/usr/bin/${xx}"
+  bin=$1
+  for server in ${hostlist}; do
+    ssh ${server} killall -q "${bin}"
+    echo "============sync to ${server}============="
+    rsync "${bin}" "${server}:~/program/usr/bin/${bin}"
+  done
 }
 
 case "$1" in
-    d) # distribute
-      syncbin think
-      syncbin server
-      syncbin dell
-      #syncbin dualcore
-      ;;
-    b) # build
-      ghc --make -Wall -threaded -fforce-recomp "$xx"
-      ;;
+  'd') # distribute
+    syncbin "$2"
+    ;;
+  'b') # build
+    echo "with opts: ${ghcopts}"
+    ghc ${ghcopts} "$2"
+    ;;
 esac
     
