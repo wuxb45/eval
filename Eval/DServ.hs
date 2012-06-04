@@ -288,7 +288,7 @@ parseDServerInfo str = DServerInfo host port ty
 -- }}}
 -- connectSocket {{{
 connectSocket :: DServerInfo -> IO Handle
-connectSocket dsi@(DServerInfo n p _) = do
+connectSocket (DServerInfo n p _) = do
   --putStrLn $ show dsi
   h <- connectTo n $ portNumber p
   --putStrLn "client -> Server ok"

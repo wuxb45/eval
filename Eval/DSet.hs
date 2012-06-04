@@ -7,7 +7,21 @@
 -- }}}
 
 -- module export {{{
-module Eval.DSet where
+module Eval.DSet (
+  -- data
+  DSetConfig(..), DataSet, DSetMetaMap,
+  MetaCountMap, MetaFullMap, MetaSimpleMap,
+  StorageInfo, DSetNode(..), DSetReq(..),
+  -- client
+  clientAddElemN, clientDelElemN, clientDelAll,
+  clientGetSet, clientPickStorR, clientPickStorW,
+  clientSimpleMap, clientFullMap, clientCountMap,
+  clientBackup, clientDSetCmdH, clientCmdH,
+  -- user
+  lookupDSetServer, putDSetBS, makeStdEname,
+  runDSetClientREPL, putSingleton, putSplit, getFile,
+  runDSetSimpleServer,
+  ) where
 -- }}}
 
 -- import {{{
@@ -22,7 +36,7 @@ import Prelude (($), (.), (+), (>), (==), (++), (-), (/=), (||), (&&),
                 IO, String, Show(..), Integer, id, toInteger,
                 const, read, snd, mod, undefined,)
 import Control.Applicative ((<$>), )
-import Control.Monad (Monad(..), mapM, mapM_, join, sequence_, void,)
+import Control.Monad (Monad(..), mapM, mapM_, join, void,)
 import Control.Concurrent (MVar, readMVar, modifyMVar_, newMVar,
                            modifyMVar, threadDelay, forkIO,)
 import Control.Exception (catch,)
@@ -34,14 +48,21 @@ import Data.Serialize (Serialize(..),)
 import System.IO (Handle, withFile, IOMode(..),
                   getLine, putStrLn, hFlush, stdout,)
 import Data.List (map, filter, foldr, length,
-                  concat, sum, words, repeat,)
+                  concat, sum, words,)
 import System.FilePath (FilePath, )
 import System.Directory (createDirectoryIfMissing)
 import GHC.Generics (Generic)
 import Text.Printf (printf)
 ------
-import Eval.DServ
-import Eval.Storage
+import Eval.DServ (ZKInfo(..), DServerInfo(..), DService(..),
+                   AHandler, IOHandler, ioaHandler,
+                   accessServer, forkServer, waitCloseSignal, listServer,
+                   forkChildrenWatcher,
+                   commonInitial, aHandler, clientRecvA, clientNoRecv,
+                   respOK, respFail, putObject, getObject,)
+import Eval.Storage (CheckSum, DSDirInfo, listOnlineStorage, clientList,
+                     clientPutBS, checkSumBS, openBinBufFile, clientGetH,)
+               
 -- }}}
 
 -- data {{{
@@ -74,7 +95,9 @@ data DSetNode = DSetNode
 -- DSetReq {{{
 data DSetReq
   = DSetRAddElemN    String [(String, CheckSum)]
+  | DSetRAddElem     String (String, CheckSum)
   | DSetRDelElemN    String [String]
+  | DSetRDelElem     String String
   | DSetRDelAll      String
   | DSetRGetSet      String -- returns DataSet
   | DSetRPickStorR   String -- returns (Maybe DServerInfo)
@@ -82,6 +105,7 @@ data DSetReq
   | DSetRSimpleMap
   | DSetRFullMap
   | DSetRCountMap
+  | DSetRBackup
   deriving (Show, Generic)
 instance Serialize DSetReq where
 -- }}}
@@ -104,6 +128,20 @@ dsetLookup node sname = do
   maybe (return Map.empty) (\s -> RWVar.with s return) mbset
 -- }}}
 
+-- dsetAddElem {{{
+dsetAddElem :: DSetNode -> String -> (String, CheckSum) -> IO ()
+dsetAddElem node sname (k,v) = do
+  let newMap = Map.singleton k v
+  mbset <- RWVar.with (dsetMetaMap node) $ return . Map.lookup sname
+  case mbset of
+    Just set -> do
+      RWVar.modify_ set $ return . Map.union newMap
+    _ -> do
+      set <- RWVar.new newMap
+      RWVar.modify_ (dsetMetaMap node) $ return . Map.insert sname set
+  --dsetBackup node
+-- }}}
+
 -- dsetAddElemN {{{
 dsetAddElemN :: DSetNode -> String -> [(String, CheckSum)] -> IO ()
 dsetAddElemN node sname pairs = do
@@ -115,7 +153,7 @@ dsetAddElemN node sname pairs = do
     _ -> do
       set <- RWVar.new newMap
       RWVar.modify_ (dsetMetaMap node) $ return . Map.insert sname set
-  dsetBackup node
+  --dsetBackup node
 -- }}}
 
 -- dsetDelElem {{{
@@ -126,7 +164,7 @@ dsetDelElem node sname ename = do
     Just set -> do
       RWVar.modify_ set $ return . Map.delete ename
     _ -> return ()
-  dsetBackup node
+  --dsetBackup node
 -- }}}
 
 -- dsetDelElemN {{{
@@ -137,14 +175,14 @@ dsetDelElemN node sname enames = do
     Just set -> do
       RWVar.modify_ set $ return . flip (foldr Map.delete) enames
     _ -> return ()
-  dsetBackup node
+  --dsetBackup node
 -- }}}
 
 -- dsetDelAll {{{
 dsetDelAll :: DSetNode -> String -> IO ()
 dsetDelAll node sname = do
   RWVar.modify_ (dsetMetaMap node) $ return . Map.delete sname
-  dsetBackup node
+  --dsetBackup node
 -- }}}
 
 -- dsetSimpleMap {{{
@@ -294,9 +332,14 @@ startStorageMonitor node zkinfo = do
   -- update on event
   void $ forkChildrenWatcher zkinfo "/d" $ const updater
   -- every 10 sec. 1,000,000 => 1 sec
-  void $ forkIO $ sequence_ $ repeat $ updater >> threadDelay 10000000
+  void $ forkIO repeatUpdater
   where
     updater = updateStorageNode node
+    repeatUpdater = do
+      dsetBackup node
+      updater
+      threadDelay 10000000
+      repeatUpdater
 -- }}}
 
 -- makeConf {{{
@@ -379,8 +422,12 @@ handleReq node remoteH req = do
   case req of
     (DSetRAddElemN sname pairs) ->
       respOKDo $ dsetAddElemN node sname pairs
+    (DSetRAddElem sname pair) ->
+      respOKDo $ dsetAddElem node sname pair
     (DSetRDelElemN sname enames) ->
       respOKDo $ dsetDelElemN node sname enames
+    (DSetRDelElem sname ename) ->
+      respOKDo $ dsetDelElem node sname ename
     (DSetRDelAll sname) ->
       respOKDo $ dsetDelAll node sname
     (DSetRGetSet sname) ->
@@ -395,6 +442,8 @@ handleReq node remoteH req = do
       respDo $ dsetRemoteFullMap node remoteH
     (DSetRCountMap) ->
       respDo $ dsetRemoteCountMap node remoteH
+    (DSetRBackup) ->
+      respOKDo $ dsetBackup node
   where
     respDo op = op `catch` (ioaHandler (respFail remoteH) ())
     respOKDo op = respDo (op >> respOK remoteH)
@@ -455,7 +504,7 @@ clientFullMapList remoteH = do
   return $ concat $ Map.elems $
     Map.mapWithKey (\k v -> ((k ++ " ## ") ++) . show <$> v) tree
 -- }}}
--- clientFullCountMap {{{
+-- clientCountMap {{{
 clientCountMap :: AHandler (Maybe MetaCountMap)
 clientCountMap remoteH = do
   clientRecvA DSetRCountMap remoteH
@@ -466,18 +515,23 @@ clientCountMapList remoteH = do
   return $ concat $ Map.elems $
     Map.mapWithKey (\k v -> ((k ++ " ## ") ++) . show <$> v) tree
 -- }}}
+-- clientBackup {{{
+clientBackup :: AHandler Bool
+clientBackup remoteH = do
+  clientNoRecv (DSetRBackup) remoteH
+-- }}}
 -- clientDSetCmd {{{
 clientDSetCmdH :: [String] -> AHandler (Either Bool [String])
 clientDSetCmdH = clientCmdH
 
 clientCmdH :: [String] -> AHandler (Either Bool [String])
-clientCmdH ("add1":sname:ename:len:chksum:[]) =
+clientCmdH ("addm1":sname:ename:len:chksum:[]) =
   (Left <$>) . clientAddElemN sname [(ename, (read len, chksum))]
-clientCmdH ("del1":sname:ename:[]) =
+clientCmdH ("delm1":sname:ename:[]) =
   (Left <$>) . clientDelElemN sname [ename]
-clientCmdH ("del":sname:[]) =
+clientCmdH ("delm":sname:[]) =
   (Left <$>) . clientDelAll sname
-clientCmdH ("get":sname:[]) =
+clientCmdH ("getm":sname:[]) =
   (Right . map show . maybe [] Map.toList <$>) . clientGetSet sname
 clientCmdH ("pickr":ename:[]) =
   (Right . return . show <$>) . clientPickStorR ename
@@ -489,6 +543,8 @@ clientCmdH ("lf":[]) =
   (Right <$>) . clientFullMapList
 clientCmdH ("lc":[]) =
   (Right <$>) . clientCountMapList
+clientCmdH ("backup":[]) =
+  (Left <$>) . clientBackup
 clientCmdH _ = return . const (Right ["unknown command!"])
 
 -- }}}
@@ -580,7 +636,7 @@ getFile dset sname filepath = do
       else return True
 -- }}}
 
--- runSimpleServer {{{
+-- runDSetSimpleServer {{{
 runDSetSimpleServer :: ZKInfo -> Integer -> FilePath -> IO ()
 runDSetSimpleServer zkinfo port rootpath = do
   commonInitial
@@ -595,15 +651,16 @@ printHelp = mapM_ putStrLn $
   [ "> put1   <sname> <filename>"
   , "> put    <sname> <filename>"
   , "> get    <sname> <filename>"
-  , "> add1   <sname> <ename> <length> <checksum>"
-  , "> del1   <sname> <ename>"
-  , "> del    <sname>"
-  , "> get    <sname>"
+  , "> addm1   <sname> <ename> <length> <checksum>"
+  , "> delm1   <sname> <ename>"
+  , "> delm    <sname>"
+  , "> getm    <sname>"
   , "> pickr  <ename>"
   , "> pickw"
   , "> ls"
   , "> lf"
-  , "> lc"]
+  , "> lc"
+  , "> backup"]
 -- }}}
 
 -- runClientREPL {{{

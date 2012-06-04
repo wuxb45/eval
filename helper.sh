@@ -20,7 +20,18 @@ syncbin ()
   for server in ${hostlist}; do
     ssh ${server} killall -q "${bin}"
     echo "============sync to ${server}============="
-    rsync "${bin}" "${server}:~/program/usr/bin/${bin}"
+    rsync "${bin}" "${server}"':~/program/usr/bin/'"${bin}"
+  done
+}
+
+startall ()
+{
+  bin=$1
+  cmd=$@
+  for server in ${hostlist}; do
+    echo "============start on ${server}============="
+    ssh ${server} killall -q "${bin}"
+    ssh "${server}" 'nohup ~/program/usr/bin/'"${cmd}"' &>/dev/null &'
   done
 }
 
@@ -32,5 +43,8 @@ case "$1" in
     echo "with opts: ${ghcopts}"
     ghc ${ghcopts} "$2"
     ;;
+  'x') # start to run
+    shift
+    startall $@
 esac
     
