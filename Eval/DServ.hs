@@ -187,9 +187,9 @@ loopServer :: IORef Bool -> Socket -> DService -> IO ()
 loopServer ref sock ds = do
   running <- readIORef ref
   when running $ do
-    putStrLn "loopServer: waiting for client"
+    --putStrLn "loopServer: waiting for client"
     oneServer sock ds `catch` ioaHandler (writeIORef ref False) ()
-    putStrLn "loopServer: oneServer forked"
+    --putStrLn "loopServer: oneServer forked"
     loopServer ref sock ds
 -- }}}
 -- oneServer {{{
@@ -207,12 +207,12 @@ forkServer zki ds port = do
   mbsock <- listenSS port
   case mbsock of
     Just sock -> do
-      putStrLn "Listen OK"
+      --putStrLn "Listen OK"
       let dsi = DServerInfo hostname port (dsType ds)
       mbzk <- registerZK zki dsi
       case mbzk of
         Just zk -> do
-          putStrLn "ZK OK"
+          --putStrLn "ZK OK"
           ref <- newIORef True
           tid <- forkIO $ loopServer ref sock ds
           return $ Just $ DServerData tid port zk ref ds dsi
@@ -289,9 +289,9 @@ parseDServerInfo str = DServerInfo host port ty
 -- connectSocket {{{
 connectSocket :: DServerInfo -> IO Handle
 connectSocket dsi@(DServerInfo n p _) = do
-  putStrLn $ show dsi
+  --putStrLn $ show dsi
   h <- connectTo n $ portNumber p
-  putStrLn "client -> Server ok"
+  --putStrLn "client -> Server ok"
   hSetBuffering h $ BlockBuffering Nothing --LineBuffering
   return h
 -- }}}
@@ -387,10 +387,10 @@ forkWatcher (ZKInfo hostport) rewatcher action = do
     _ -> return False
   where
     watcher mvar zh _ _ _ = do
-      putStrLn "get event"
+      --putStrLn "get event"
       putMVar mvar zh
     handler mvar = do
-      putStrLn "handler: waiting"
+      --putStrLn "handler: waiting"
       zh <- takeMVar mvar
       a <- rewatcher zh
       void $ action a

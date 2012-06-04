@@ -199,7 +199,7 @@ pullDataInfo si = do
 updateStorageNode :: DSetNode -> IO ()
 updateStorageNode node = do
   storList <- pullAllDataInfo node
-  putStrLn $ "update current storage: " ++ (show $ length storList)
+  --putStrLn $ "update current storage: " ++ (show $ length storList)
   let maxix = length storList - 1
   modifyMVar_ (dsetStorage node) $
     return . const (listArray (0, maxix) storList)
@@ -338,7 +338,7 @@ dsetRemoteSimpleMap :: DSetNode -> Handle -> IO ()
 dsetRemoteSimpleMap node remoteH = do
   respOK remoteH
   tree <- dsetSimpleMap node
-  putStrLn $ "send simple tree back" ++ show tree
+  --putStrLn $ "send simple tree back" ++ show tree
   putObject remoteH tree
   respOK remoteH
 -- }}}
@@ -348,7 +348,7 @@ dsetRemoteFullMap :: DSetNode -> Handle -> IO ()
 dsetRemoteFullMap node remoteH = do
   respOK remoteH
   tree <- dsetFullMap node
-  putStrLn $ "send full tree back" ++ show tree
+  --putStrLn $ "send full tree back" ++ show tree
   putObject remoteH tree
   respOK remoteH
 -- }}}
@@ -358,7 +358,7 @@ dsetRemoteCountMap :: DSetNode -> Handle -> IO ()
 dsetRemoteCountMap node remoteH = do
   respOK remoteH
   tree <- dsetCountMap node
-  putStrLn $ "send count tree back" ++ show tree
+  --putStrLn $ "send count tree back" ++ show tree
   putObject remoteH tree
   respOK remoteH
 -- }}}
@@ -367,7 +367,7 @@ dsetRemoteCountMap node remoteH = do
 dsetHandler :: DSetNode -> IOHandler
 dsetHandler node remoteH = do
   mbReq <- getObject remoteH
-  putStrLn $ "recv req: " ++ show mbReq
+  --putStrLn $ "recv req: " ++ show mbReq
   case mbReq of
     Just req -> handleReq node remoteH req
     _ -> respFail remoteH

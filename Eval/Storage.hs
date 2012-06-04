@@ -316,7 +316,7 @@ deleteDSFile node dsfile = do
 -- uses read lock on file
 nodeRemoteReadFile :: DSNode -> String -> Handle -> IO ()
 nodeRemoteReadFile node name remoteH = do
-  putStrLn $ "remote read file: " ++ name
+  --putStrLn $ "remote read file: " ++ name
   mbdsfile <- nodeLookupFile node name
   case mbdsfile of
     Just dsfile -> RWL.withRead (dsRWLock dsfile) $ do
@@ -351,9 +351,9 @@ nodeRemoteWriteFile node name sum remoteH = do
   respOK remoteH
   nodeLocalDeleteCache node name
   nodeLocalDeleteFile node name
-  putStrLn "start pipe to DSFile"
+  --putStrLn "start pipe to DSFile"
   mbdsfile <- pipeToDSFile node (fst sum) remoteH
-  putStrLn "finish pipe to DSFile"
+  --putStrLn "finish pipe to DSFile"
   case mbdsfile of
     Just dsfile -> do
       modifyMVar_ (nodeFileM node) $ return . Map.insert name dsfile
@@ -365,9 +365,9 @@ nodeRemoteWriteFile node name sum remoteH = do
 nodeRemoteWriteCache :: DSNode -> String -> CheckSum -> Handle -> IO ()
 nodeRemoteWriteCache node name sum remoteH = do
   respOK remoteH
-  putStrLn "write cache started"
+  --putStrLn "write cache started"
   bs <- BS.hGet remoteH (fromIntegral $ fst sum)
-  putStrLn "write cache finished"
+  --putStrLn "write cache finished"
   RWVar.modify_ (nodeCacheM node) $ return . Map.insert name bs
   respOK remoteH
   --void $ forkIO $ nodeLocalDumpFile node name
@@ -581,7 +581,7 @@ nodeLocalVerify :: DSNode -> String -> Maybe CheckSum -> IO Bool
 nodeLocalVerify node name mbsum@(Just sum) = do
   mbdsfileOK <- nodeLocalVerifyFile node name mbsum
   mbcacheOK <- nodeLocalVerifyCache node name sum
-  putStrLn $ "localverify:" ++ show (mbdsfileOK, mbcacheOK)
+  --putStrLn $ "localverify:" ++ show (mbdsfileOK, mbcacheOK)
   case (mbdsfileOK, mbcacheOK) of
     (Just True, _) -> return True
     (_, Just True) -> return True
@@ -593,7 +593,7 @@ nodeLocalVerify node name Nothing = do
   mbcacheOK <- case mbsum of
     Just sum -> nodeLocalVerifyCache node name sum
     _ -> maybe Nothing (const $ Just True) <$> nodeLookupCache node name
-  putStrLn $ "localverify:" ++ show (mbdsfileOK, mbcacheOK)
+  --putStrLn $ "localverify:" ++ show (mbdsfileOK, mbcacheOK)
   case (mbdsfileOK, mbcacheOK) of
     (Just True, _) -> return True
     (_, Just True) -> return True
@@ -639,7 +639,7 @@ loadNodeMeta conf = do
 storageHandler :: DSNode -> IOHandler
 storageHandler node remoteH = do
   mbReq <- getObject remoteH
-  putStrLn $ "recv request:" ++ show mbReq
+  --putStrLn $ "recv request:" ++ show mbReq
   case mbReq of
     Just req -> handleReq node remoteH req
     _ -> respFail remoteH
@@ -656,7 +656,7 @@ handleReq node remoteH req = do
       respDo $ nodeRemoteReadCache node name remoteH
     -- Put
     (DSRPutFile name sum) -> do
-      putStrLn $ "processing PutFile"
+      --putStrLn $ "processing PutFile"
       if fst sum > 0x10000000
       then respFail remoteH
       else respDo $ nodeRemoteWriteFile node name sum remoteH
@@ -712,16 +712,16 @@ closeStorage h = do
 -- clientPutFile {{{
 clientPutFile :: Bool -> String -> FilePath -> AHandler Bool
 clientPutFile cache name filepath remoteH = do
-  putStrLn $ "start get chksum:"
+  --putStrLn $ "start get chksum:"
   chksum <- checkSumFile filepath
-  putStrLn $ "sum:" ++ show chksum
+  --putStrLn $ "sum:" ++ show chksum
   clientTwoStage (req chksum) putData remoteH
   where
     req chksum = (if cache then DSRPutCache else DSRPutFile) name chksum
     putData rH = do
-      putStrLn "start send file content"
+      --putStrLn "start send file content"
       openBinBufFile filepath ReadMode >>= flip pipeAll rH
-      putStrLn "finish send file content"
+      --putStrLn "finish send file content"
       return True
 -- }}}
 
