@@ -559,7 +559,7 @@ clientCmdH ("lc":[]) =
   (Right <$>) . clientCountMapList
 clientCmdH ("backup":[]) =
   (Left <$>) . clientBackup
-clientCmdH _ = return . const (Right ["unknown command!"])
+clientCmdH _ = return . const (Right ["?? type \'h\' for help"])
 -- }}}
 -- }}}
 

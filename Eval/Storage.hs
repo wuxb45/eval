@@ -161,7 +161,7 @@ showBS = concatMap (printf "%02x") . BS.unpack
 
 -- showCheckSum {{{
 showCheckSum :: CheckSum -> String
-showCheckSum (len, bs) = show len ++ showBS bs
+showCheckSum (len, bs) = show len ++ ", " ++ showBS bs
 -- }}}
 
 -- readSHA1 {{{
