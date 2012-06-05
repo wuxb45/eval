@@ -781,6 +781,7 @@ clientGetFile cache name localpath remoteH = do
         Just size -> do
           localH <- openBinBufFile localpath WriteMode
           pipeSome size rH localH
+          hClose localH
           return True
         _ -> return False
 -- }}}
