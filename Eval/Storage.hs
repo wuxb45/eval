@@ -7,6 +7,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DoAndIfThenElse #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE BangPatterns #-}
 -- }}}
 
 -- module export {{{
@@ -15,7 +16,7 @@ module Eval.Storage (
   DSNode(..), DSDirInfo, DSFile(..), DSData,
   checkSumBS, checkSumBSL, checkSumFile, checkSumDSPath,
   uniqueName, openBinBufFile, getFileSize,
-  pipeSome, pipeAll,
+  pipeSome, pipeAll, toKey, fromKey,
   makeDSService, storageServiceType,
   clientPutFile, clientPutBS, clientPutH,
   clientGetFile, clientGetH,
@@ -38,22 +39,24 @@ import qualified Control.Concurrent.ReadWriteLock as RWL
 import Prelude (($), (.), (+), (>), (==), (++), (-), (/=), (>=), (||),
                 flip, Bool(..), compare, fromIntegral, fst,
                 IO, String, Show(..), Integer, id, toInteger, Int,
-                const, read)
+                const, read, undefined,)
 import Control.Applicative ((<$>), (<*>))
 import Control.Monad (Monad(..), mapM_, when, unless, void)
 import Control.Concurrent (MVar, readMVar, modifyMVar_, newMVar,
                            withMVar, forkIO, modifyMVar,)
 import Control.Exception (catch,)
-import Control.DeepSeq (deepseq)
+--import Control.DeepSeq (deepseq)
+import Data.Bits (shiftL, (.|.),)
 import Data.Maybe (Maybe(..), maybe, isNothing)
 import Text.Printf (printf)
 import Data.Either (Either(..))
+import Data.ByteString.UTF8 (fromString, toString,)
 import System.IO (Handle, withFile, IOMode(..),
                   putStrLn, BufferMode(..), hSetBuffering,
                   openBinaryFile, hClose, hFlush, stdout, getLine)
 import Data.Tuple (swap,)
-import Data.List (foldl', concatMap, map, filter, all, elem, (!!),
-                  zip, words, length, head,)
+import Data.List (map, filter, all, elem, (!!),
+                  zip, words, length, head, sum,)
 import System.IO.Unsafe (unsafePerformIO)
 import System.FilePath (FilePath, (</>),)
 import System.Directory (removeFile, createDirectoryIfMissing)
@@ -76,6 +79,9 @@ import Eval.DServ (AHandler, IOHandler, DService(..),
 -- }}}
 
 -- data {{{
+-- Key {{{
+type Key = BS.ByteString
+-- }}}
 -- DStorConfig {{{
 data DStorConfig = DStorConfig
   { confMetaData :: FilePath,
@@ -85,7 +91,7 @@ data DStorConfig = DStorConfig
 instance Serialize DStorConfig where
 -- }}}
 -- CheckSum {{{
-type CheckSum = (Integer, String)
+type CheckSum = (Integer, BS.ByteString)
 -- }}}
 -- StorageAccessLog {{{
 --data StorageAccessLog = SALog [StorageAccess] deriving (Show, Generic)
@@ -96,48 +102,50 @@ type CheckSum = (Integer, String)
 -- }}}
 -- DSFile {{{
 data DSFile
-  = DSFile { dsCheckSum :: CheckSum,
-             dsFilePath :: FilePath,
-             dsRWLock   :: RWL.RWLock }
+  = DSFile { dsfCheckSum :: CheckSum,
+             dsfFilePath :: FilePath,
+             dsfRWLock   :: RWL.RWLock }
   deriving (Generic)
 instance Serialize DSFile where
-  put (DSFile sum path _) = put sum >> put path
+  put (DSFile chksum path _) = put chksum >> put path
   get = DSFile <$> get <*> get <*> (return $ unsafePerformIO RWL.new)
 instance Show DSFile where
-  show (DSFile sum path _) = "DSFile[" ++ show sum ++ path ++ "]"
+  show (DSFile chksum path _) = "DSFile[" ++ show chksum ++ path ++ "]"
 -- }}}
 -- DSData {{{
-type DSData = BS.ByteString
+data DSData
+  = DSData { dsdCheckSum :: CheckSum,
+             dsdData     :: BS.ByteString }
 -- }}}
 -- DSNode {{{
 data DSNode = DSNode
-  { nodeFileM   :: MVar (Map.Map String DSFile),
-    nodeCacheM  :: RWVar.RWVar (Map.Map String DSData),
+  { nodeFileM   :: MVar (Map.Map Key DSFile),
+    nodeCacheM  :: RWVar.RWVar (Map.Map Key DSData),
     nodeConfig  :: DStorConfig }
 --type DSNodeStatic = Map.Map String DSFile
 -- }}}
 -- DSDirInfo {{{
-type DSDirInfo = Map.Map String CheckSum
+type DSDirInfo = Map.Map Key CheckSum
 -- }}}
 -- DSReq {{{
 -- req -> resp -> OP
 data DSReq
-  = DSRPutFile    String CheckSum
-  | DSRPutCache   String CheckSum
-  | DSRGetFile    String
-  | DSRGetCache   String
-  | DSRDelFile    String
-  | DSRDelCache   String
+  = DSRPutFile    Key CheckSum
+  | DSRPutCache   Key CheckSum
+  | DSRGetFile    Key
+  | DSRGetCache   Key
+  | DSRDelFile    Key
+  | DSRDelCache   Key
   | DSRListFile
   | DSRListCache
-  | DSRFreeze     String
+  | DSRFreeze     Key
   | DSRFreezeAll
   | DSRBackup
   | DSRCacheSize
-  | DSRVerify     String (Maybe CheckSum) -- verify by checksum, delete on fail
-  | DSRGetSum     String
-  | DSRDupFile    String DServerInfo
-  | DSRDupCache   String DServerInfo
+  | DSRVerify     Key (Maybe CheckSum) -- verify by checksum, delete on fail
+  | DSRGetSum     Key
+  | DSRDupFile    Key DServerInfo
+  | DSRDupCache   Key DServerInfo
   deriving (Generic, Show)
 instance Serialize DSReq where
 -- }}}
@@ -145,14 +153,28 @@ instance Serialize DSReq where
 
 -- basic helper {{{
 
+-- readSHA1 {{{
+readSHA1 :: String -> BS.ByteString
+readSHA1 (a:b:rest) = BS.cons (read2 a b) $ readSHA1 rest
+  where
+  hexMap = Map.fromList $ [
+    ('0',0), ('1',1), ('2',2), ('3',3), ('4',4),
+    ('5',5), ('6',6), ('7',7), ('8',8), ('9',9),
+    ('a',10),('b',11),('c',12),('d',13),('e',14),('f',15),
+    ('A',10),('B',11),('C',12),('D',13),('E',14),('F',15)]
+  read1 x = maybe undefined id $ Map.lookup x hexMap
+  read2 x y = ((read1 x) `shiftL` 4) .|. (read1 y)
+readSHA1 _ = BS.empty
+-- }}}
+
 -- checkSum {{{
 checkSumBS :: BS.ByteString -> CheckSum
-checkSumBS bs = sum `deepseq` (fromIntegral (BS.length bs), sum)
-  where sum = concatMap (printf "%02x") $ BS.unpack $ SHA1.hash bs
+checkSumBS bs = (fromIntegral (BS.length bs), chksum)
+  where !chksum = SHA1.hash bs
 
 checkSumBSL :: BSL.ByteString -> CheckSum
-checkSumBSL bs = sum `deepseq` (fromIntegral (BSL.length bs), sum)
-  where sum = concatMap (printf "%02x") $ BS.unpack $ SHA1.hashlazy bs
+checkSumBSL bs = (fromIntegral (BSL.length bs), chksum)
+  where !chksum = SHA1.hashlazy bs
 
 checkSumFile :: FilePath -> IO CheckSum
 checkSumFile path = do
@@ -165,14 +187,23 @@ checkSumDSPath node path = do
   checkSumBS <$> BS.hGetContents h
 
 verifyDSFile :: DSNode -> DSFile -> Maybe CheckSum -> IO Bool
-verifyDSFile node dsfile mbsum = do
-  if maybe True (dssum ==) mbsum
+verifyDSFile node dsfile mbchksum = do
+  if maybe True (fsum ==) mbchksum
   then do
-    ((dssum ==) <$> checkSumDSPath node dspath) `catch` aHandler False
+    ((fsum ==) <$> checkSumDSPath node fpath) `catch` aHandler False
   else return False
   where
-    dssum = dsCheckSum dsfile
-    dspath = dsFilePath dsfile
+    fsum = dsfCheckSum dsfile
+    fpath = dsfFilePath dsfile
+
+verifyDSData :: DSData -> Maybe CheckSum -> Bool
+verifyDSData dsd mbchksum = do
+  if maybe True (dsum ==) mbchksum
+  then dsum == checkSumBS ddata
+  else False
+  where
+    dsum = dsdCheckSum dsd
+    ddata = dsdData dsd
 -- }}}
 
 -- unique {{{
@@ -187,7 +218,7 @@ uniqueName = do
 -- fullDSFilePath {{{
 fullDSFilePath :: DSNode -> DSFile -> FilePath
 fullDSFilePath node dsfile =
-  fullLocalFilePath node $ dsFilePath dsfile
+  fullLocalFilePath node $ dsfFilePath dsfile
 -- }}}
 
 -- fullLocalFilePath {{{
@@ -249,6 +280,14 @@ pipeAll from to = do
     lim = 0x100000
 -- }}}
 
+-- keyOP {{{
+toKey :: String -> Key
+toKey = fromString
+
+fromKey :: Key -> String
+fromKey = toString
+-- }}}
+
 -- }}}
 
 -- DSFile {{{
@@ -271,14 +310,13 @@ pipeToDSFile node count from = do
 -- }}}
 
 -- bsToDSFile {{{
-bsToDSFile :: DSNode -> BS.ByteString -> IO DSFile
-bsToDSFile node bs = do
+cacheToDSFile :: DSNode -> DSData -> IO DSFile
+cacheToDSFile node dsd = do
   path <- uniqueName
   to <- openLocalFile node path WriteMode
-  BS.hPut to bs
+  BS.hPut to $ dsdData dsd
   lock <- RWL.new
-  let chksum = checkSumBS bs
-  return $ DSFile chksum path lock
+  return $ DSFile (dsdCheckSum dsd) path lock
 -- }}}
 
 -- pipeToRemote {{{
@@ -314,12 +352,12 @@ deleteDSFile node dsfile = do
 -- remote
 -- nodeRemoteReadFile {{{
 -- uses read lock on file
-nodeRemoteReadFile :: DSNode -> String -> Handle -> IO ()
+nodeRemoteReadFile :: DSNode -> Key -> Handle -> IO ()
 nodeRemoteReadFile node name remoteH = do
   --putStrLn $ "remote read file: " ++ name
   mbdsfile <- nodeLookupFile node name
   case mbdsfile of
-    Just dsfile -> RWL.withRead (dsRWLock dsfile) $ do
+    Just dsfile -> RWL.withRead (dsfRWLock dsfile) $ do
       respOK remoteH
       size <- localDSFileSize node dsfile
       putObject remoteH size
@@ -331,14 +369,14 @@ nodeRemoteReadFile node name remoteH = do
 -- }}}
 
 -- nodeRemoteReadCache {{{
-nodeRemoteReadCache :: DSNode -> String -> Handle -> IO ()
+nodeRemoteReadCache :: DSNode -> Key -> Handle -> IO ()
 nodeRemoteReadCache node name remoteH = do
-  mbbs <- nodeLookupCache node name
-  case mbbs of
-    Just bs -> do
+  mbentry <- nodeLookupCache node name
+  case mbentry of
+    Just entry -> do
       respOK remoteH
-      putObject remoteH $ toInteger $ BS.length bs
-      BS.hPut remoteH bs
+      putObject remoteH $ dsdCheckSum entry
+      BS.hPut remoteH $ dsdData entry
       respOK remoteH
     _ -> do
       nodeRemoteReadFile node name remoteH
@@ -346,13 +384,13 @@ nodeRemoteReadCache node name remoteH = do
 -- }}}
 
 -- nodeRemoteWriteFile {{{
-nodeRemoteWriteFile :: DSNode -> String -> CheckSum -> Handle -> IO ()
-nodeRemoteWriteFile node name sum remoteH = do
+nodeRemoteWriteFile :: DSNode -> Key -> CheckSum -> Handle -> IO ()
+nodeRemoteWriteFile node name chksum remoteH = do
   respOK remoteH
   nodeLocalDeleteCache node name
   nodeLocalDeleteFile node name
   --putStrLn "start pipe to DSFile"
-  mbdsfile <- pipeToDSFile node (fst sum) remoteH
+  mbdsfile <- pipeToDSFile node (fst chksum) remoteH
   --putStrLn "finish pipe to DSFile"
   case mbdsfile of
     Just dsfile -> do
@@ -362,26 +400,26 @@ nodeRemoteWriteFile node name sum remoteH = do
 -- }}}
 
 -- nodeRemoteWriteCache {{{
-nodeRemoteWriteCache :: DSNode -> String -> CheckSum -> Handle -> IO ()
-nodeRemoteWriteCache node name sum remoteH = do
+nodeRemoteWriteCache :: DSNode -> Key -> CheckSum -> Handle -> IO ()
+nodeRemoteWriteCache node key chksum remoteH = do
   respOK remoteH
   --putStrLn "write cache started"
-  bs <- BS.hGet remoteH (fromIntegral $ fst sum)
+  bs <- BS.hGet remoteH (fromIntegral $ fst chksum)
   --putStrLn "write cache finished"
-  RWVar.modify_ (nodeCacheM node) $ return . Map.insert name bs
+  RWVar.modify_ (nodeCacheM node) $ return . Map.insert key (DSData chksum bs)
   respOK remoteH
   --void $ forkIO $ nodeLocalDumpFile node name
 -- }}}
 
 -- nodeRemoteDeleteFile {{{
-nodeRemoteDeleteFile :: DSNode -> String -> Handle -> IO ()
+nodeRemoteDeleteFile :: DSNode -> Key -> Handle -> IO ()
 nodeRemoteDeleteFile node name remoteH = do
   nodeLocalDeleteFile node name
   respOK remoteH
 -- }}}
 
 -- nodeRemoteDeleteCache {{{
-nodeRemoteDeleteCache :: DSNode -> String -> Handle -> IO ()
+nodeRemoteDeleteCache :: DSNode -> Key -> Handle -> IO ()
 nodeRemoteDeleteCache node name remoteH = do
   nodeLocalDeleteCache node name
   respOK remoteH
@@ -392,7 +430,7 @@ nodeRemoteListFile :: DSNode -> Handle -> IO ()
 nodeRemoteListFile node remoteH = do
   respOK remoteH
   filemap <- readMVar (nodeFileM node)
-  putObject remoteH (Map.map (dsCheckSum) filemap :: DSDirInfo)
+  putObject remoteH $ Map.map dsfCheckSum filemap
   respOK remoteH
 -- }}}
 
@@ -401,7 +439,7 @@ nodeRemoteListCache :: DSNode -> Handle -> IO ()
 nodeRemoteListCache node remoteH = do
   respOK remoteH
   cachemap <- RWVar.with (nodeCacheM node) $ return
-  putObject remoteH (Map.map checkSumBS cachemap :: DSDirInfo)
+  putObject remoteH (Map.map dsdCheckSum cachemap :: DSDirInfo)
   respOK remoteH
 -- }}}
 
@@ -415,7 +453,7 @@ nodeRemoteMemoryUsage node remoteH = do
 -- }}}
 
 -- nodeRemoteVerify {{{
-nodeRemoteVerify :: DSNode -> String -> (Maybe CheckSum) -> Handle -> IO ()
+nodeRemoteVerify :: DSNode -> Key -> (Maybe CheckSum) -> Handle -> IO ()
 nodeRemoteVerify node name mbsum remoteH = do
   respOK remoteH
   ok <- nodeLocalVerify node name mbsum
@@ -424,42 +462,42 @@ nodeRemoteVerify node name mbsum remoteH = do
 -- }}}
 
 -- nodeRemoteGetSum {{{
-nodeRemoteGetSum :: DSNode -> String -> Handle -> IO ()
+nodeRemoteGetSum :: DSNode -> Key -> Handle -> IO ()
 nodeRemoteGetSum node name remoteH = do
   mbdsfile <- nodeLookupFile node name
   case mbdsfile of
     Just dsfile -> do
       respOK remoteH
-      putObject remoteH (dsCheckSum dsfile)
+      putObject remoteH (dsfCheckSum dsfile)
       respOK remoteH
     _ -> do
-      mbdata <- nodeLookupCache node name
-      case mbdata of
-        Just bs -> do
+      mbentry <- nodeLookupCache node name
+      case mbentry of
+        Just entry -> do
           respOK remoteH
-          putObject remoteH $ checkSumBS bs
+          putObject remoteH $ dsdCheckSum entry
           respOK remoteH
         _ -> respFail remoteH
 -- }}}
 
 -- nodeRemoteDupFile {{{
-nodeRemoteDup :: Bool -> DSNode -> String -> DServerInfo -> Handle -> IO ()
-nodeRemoteDup cache node name target remoteH = do
+nodeRemoteDup :: Bool -> DSNode -> Key -> DServerInfo -> Handle -> IO ()
+nodeRemoteDup cache node key target remoteH = do
   respOK remoteH
-  mbbs <- nodeLookupCache node name
-  case mbbs of
-    Just bs -> do
-      mbok <- accessServer target (clientPutBS cache name bs)
+  mbentry <- nodeLookupCache node key
+  case mbentry of
+    Just entry -> do
+      mbok <- accessServer target (clientPutBS cache key (dsdData entry))
       case mbok of
         Just True -> respOK remoteH
         _ -> respFail remoteH
     _ -> do
-      mbdsfile <- nodeLookupFile node name
+      mbdsfile <- nodeLookupFile node key
       case mbdsfile of
         Just dsfile -> do
           localH <- openDSFile node dsfile ReadMode
-          let sum = dsCheckSum dsfile
-          mbok <- accessServer target (clientPutH cache name localH sum)
+          let chksum = dsfCheckSum dsfile
+          mbok <- accessServer target (clientPutH cache key localH chksum)
           case mbok of
             Just True -> respOK remoteH
             _ -> respFail remoteH
@@ -468,13 +506,13 @@ nodeRemoteDup cache node name target remoteH = do
 
 -- local basic
 -- nodeLookupFile {{{
-nodeLookupFile :: DSNode -> String -> IO (Maybe DSFile)
+nodeLookupFile :: DSNode -> BS.ByteString -> IO (Maybe DSFile)
 nodeLookupFile node name = do
   withMVar (nodeFileM node) $ return . Map.lookup name
 -- }}}
 
 -- nodeLookupCache {{{
-nodeLookupCache :: DSNode -> String -> IO (Maybe DSData)
+nodeLookupCache :: DSNode -> Key -> IO (Maybe DSData)
 nodeLookupCache node name = do
   RWVar.with (nodeCacheM node) $ return . Map.lookup name
 -- }}}
@@ -483,47 +521,46 @@ nodeLookupCache node name = do
 nodeLocalMemoryUsage :: DSNode -> IO Integer
 nodeLocalMemoryUsage node = do
   cacheM <- RWVar.with (nodeCacheM node) return
-  return $ foldl' plus 0 $ Map.elems cacheM
-  where
-    plus orig bs = orig + (fromIntegral $ BS.length bs)
+  return $ sum $ map (fst . dsdCheckSum) $ (Map.elems cacheM)
 -- }}}
 
 -- local advanced
 -- nodeLocalDumpFile {{{
-nodeLocalDumpFile :: DSNode -> String -> IO ()
+nodeLocalDumpFile :: DSNode -> Key -> IO ()
 nodeLocalDumpFile node name = do
   mbdsfile <- nodeLookupFile node name
   when (isNothing mbdsfile) $ do
-    mbbs <- nodeLookupCache node name
-    case mbbs of
-      Just bs -> do
-        dsfile <- bsToDSFile node bs
+    mbentry <- nodeLookupCache node name
+    case mbentry of
+      Just entry -> do
+        dsfile <- cacheToDSFile node entry
         modifyMVar_ (nodeFileM node) $ return . Map.insert name dsfile
       _ -> return ()
 -- }}}
 
 -- nodeLocalFreezeData {{{
-nodeLocalFreezeData :: DSNode -> String -> IO ()
+nodeLocalFreezeData :: DSNode -> Key -> IO ()
 nodeLocalFreezeData node name = do
   nodeLocalDumpFile node name
   nodeLocalDeleteCache node name
 -- }}}
 
 -- nodeLocalCacheFile {{{
-nodeLocalCacheFile :: DSNode -> String -> IO ()
+nodeLocalCacheFile :: DSNode -> Key -> IO ()
 nodeLocalCacheFile node name = do
   mbbs <- nodeLookupCache node name
   when (isNothing mbbs) $ do
     mbdsfile <- nodeLookupFile node name
     case mbdsfile of
       Just dsfile -> do
-        bs <- RWL.withRead (dsRWLock dsfile) $ loadDSFileToBS node dsfile
-        RWVar.modify_ (nodeCacheM node) $ return . Map.insert name bs
+        entry <- RWL.withRead (dsfRWLock dsfile) $ do
+          bs <- loadDSFileToBS node dsfile
+          return $ DSData (dsfCheckSum dsfile) bs
+        RWVar.modify_ (nodeCacheM node) $ return . Map.insert name entry
       _ -> return ()
 -- }}}
 
 -- nodeLocalBackupMeta {{{
--- just backup the fileM (Map.Map String DSFile)
 nodeLocalBackupMeta :: DSNode -> IO ()
 nodeLocalBackupMeta node = do
   filemap <- readMVar (nodeFileM node)
@@ -539,60 +576,48 @@ nodeLocalFreezeAll node = do
 -- }}}
 
 -- nodeLocalDeleteFile {{{
-nodeLocalDeleteFile :: DSNode -> String -> IO ()
+nodeLocalDeleteFile :: DSNode -> Key -> IO ()
 nodeLocalDeleteFile node name = do
   mbdsfile <- modifyMVar (nodeFileM node) $
     return . swap . Map.updateLookupWithKey (const . const $ Nothing) name
   case mbdsfile of
     Just dsfile -> do
-      RWL.withWrite (dsRWLock dsfile) $ do
+      RWL.withWrite (dsfRWLock dsfile) $ do
       deleteDSFile node dsfile
     _ -> return ()
 -- }}}
 
 -- nodeLocalDeleteCache {{{
-nodeLocalDeleteCache :: DSNode -> String -> IO ()
-nodeLocalDeleteCache node name = do
-  RWVar.modify_ (nodeCacheM node) $ return . Map.delete name
+nodeLocalDeleteCache :: DSNode -> Key -> IO ()
+nodeLocalDeleteCache node key = do
+  RWVar.modify_ (nodeCacheM node) $ return . Map.delete key
 -- }}}
 
 -- nodeLocalVerify {{{
-nodeLocalVerifyFile :: DSNode -> String -> Maybe CheckSum -> IO (Maybe Bool)
-nodeLocalVerifyFile node name mbsum = do
-  mbdsfile <- nodeLookupFile node name
+nodeLocalVerifyFile :: DSNode -> Key -> Maybe CheckSum -> IO (Maybe Bool)
+nodeLocalVerifyFile node key mbsum = do
+  mbdsfile <- nodeLookupFile node key
   mbdsfileOK <- case mbdsfile of
     Just dsfile -> Just <$> verifyDSFile node dsfile mbsum
     _ -> return Nothing
   when (mbdsfileOK == Just False) $ do
-    nodeLocalDeleteFile node name
+    nodeLocalDeleteFile node key
   return mbdsfileOK
 
-nodeLocalVerifyCache :: DSNode -> String -> CheckSum -> IO (Maybe Bool)
-nodeLocalVerifyCache node name sum = do
-  mbcachesum <- (checkSumBS <$>) <$> nodeLookupCache node name
-  sumOK <- case mbcachesum of
-    Just cachesum -> return $ Just $ sum == cachesum
+nodeLocalVerifyCache :: DSNode -> Key -> Maybe CheckSum -> IO (Maybe Bool)
+nodeLocalVerifyCache node key mbsum = do
+  mbentry <- nodeLookupCache node key
+  cacheOK <- case mbentry of
+    Just entry -> return $ Just $ verifyDSData entry mbsum
     _ -> return Nothing
-  when (sumOK == Just False) $ do
-    nodeLocalDeleteCache node name
-  return sumOK
+  when (cacheOK == Just False) $ do
+    nodeLocalDeleteCache node key
+  return cacheOK
 
-nodeLocalVerify :: DSNode -> String -> Maybe CheckSum -> IO Bool
-nodeLocalVerify node name mbsum@(Just sum) = do
-  mbdsfileOK <- nodeLocalVerifyFile node name mbsum
-  mbcacheOK <- nodeLocalVerifyCache node name sum
-  --putStrLn $ "localverify:" ++ show (mbdsfileOK, mbcacheOK)
-  case (mbdsfileOK, mbcacheOK) of
-    (Just True, _) -> return True
-    (_, Just True) -> return True
-    _ -> return False
-
-nodeLocalVerify node name Nothing = do
-  mbdsfileOK <- nodeLocalVerifyFile node name Nothing
-  mbsum <- (dsCheckSum <$>) <$> nodeLookupFile node name
-  mbcacheOK <- case mbsum of
-    Just sum -> nodeLocalVerifyCache node name sum
-    _ -> maybe Nothing (const $ Just True) <$> nodeLookupCache node name
+nodeLocalVerify :: DSNode -> Key -> Maybe CheckSum -> IO Bool
+nodeLocalVerify node name mbchksum = do
+  mbdsfileOK <- nodeLocalVerifyFile node name mbchksum
+  mbcacheOK <- nodeLocalVerifyCache node name mbchksum
   --putStrLn $ "localverify:" ++ show (mbdsfileOK, mbcacheOK)
   case (mbdsfileOK, mbcacheOK) of
     (Just True, _) -> return True
@@ -655,14 +680,14 @@ handleReq node remoteH req = do
     (DSRGetCache name) ->
       respDo $ nodeRemoteReadCache node name remoteH
     -- Put
-    (DSRPutFile name sum) -> do
+    (DSRPutFile name chksum) -> do
       --putStrLn $ "processing PutFile"
-      if fst sum > 0x10000000
+      if fst chksum > 0x10000000
       then respFail remoteH
-      else respDo $ nodeRemoteWriteFile node name sum remoteH
-    (DSRPutCache name sum) -> if fst sum > 0x10000000
+      else respDo $ nodeRemoteWriteFile node name chksum remoteH
+    (DSRPutCache name chksum) -> if fst chksum > 0x10000000
       then respFail remoteH
-      else respDo $ nodeRemoteWriteCache node name sum remoteH
+      else respDo $ nodeRemoteWriteCache node name chksum remoteH
     -- List
     (DSRListFile) ->
       respDo $ nodeRemoteListFile node remoteH
@@ -710,7 +735,7 @@ closeStorage h = do
 -- Storage Client {{{
 
 -- clientPutFile {{{
-clientPutFile :: Bool -> String -> FilePath -> AHandler Bool
+clientPutFile :: Bool -> Key -> FilePath -> AHandler Bool
 clientPutFile cache name filepath remoteH = do
   --putStrLn $ "start get chksum:"
   chksum <- checkSumFile filepath
@@ -726,26 +751,26 @@ clientPutFile cache name filepath remoteH = do
 -- }}}
 
 -- clientPutBS {{{
-clientPutBS :: Bool -> String -> BS.ByteString -> AHandler Bool
+clientPutBS :: Bool -> Key -> BS.ByteString -> AHandler Bool
 clientPutBS cache name bs remoteH = do
   clientTwoStage req putData remoteH
   where
-    sum = checkSumBS bs
-    req = (if cache then DSRPutCache else DSRPutFile) name sum
+    chksum = checkSumBS bs
+    req = (if cache then DSRPutCache else DSRPutFile) name chksum
     putData rH = BS.hPut rH bs >> return True
 -- }}}
 
 -- clientPutH {{{
-clientPutH :: Bool -> String -> Handle -> CheckSum -> AHandler Bool
-clientPutH cache name from sum remoteH = do
+clientPutH :: Bool -> Key -> Handle -> CheckSum -> AHandler Bool
+clientPutH cache name from chksum remoteH = do
   clientTwoStage req pipeData remoteH
   where
-    req = (if cache then DSRPutCache else DSRPutFile) name sum
-    pipeData rH = pipeSome (fst sum) from rH >> return True
+    req = (if cache then DSRPutCache else DSRPutFile) name chksum
+    pipeData rH = pipeSome (fst chksum) from rH >> return True
 -- }}}
 
 -- clientGetFile {{{
-clientGetFile :: Bool -> String -> FilePath -> AHandler Bool
+clientGetFile :: Bool -> Key -> FilePath -> AHandler Bool
 clientGetFile cache name localpath remoteH = do
   clientTwoStage req getFile remoteH
   where
@@ -761,7 +786,7 @@ clientGetFile cache name localpath remoteH = do
 -- }}}
 
 -- clientGetH {{{
-clientGetH :: Bool -> String -> Handle -> AHandler Bool
+clientGetH :: Bool -> Key -> Handle -> AHandler Bool
 clientGetH cache name localH remoteH = do
   clientTwoStage req getH remoteH
   where
@@ -776,11 +801,11 @@ clientGetH cache name localH remoteH = do
 -- }}}
 
 -- client* with name {{{
-clientDel :: Bool -> String -> AHandler Bool
+clientDel :: Bool -> Key -> AHandler Bool
 clientDel cache name = clientNoRecv $
   if cache then DSRDelCache name else DSRDelFile name
 
-clientFreeze :: String -> AHandler Bool
+clientFreeze :: Key -> AHandler Bool
 clientFreeze name = clientNoRecv $ DSRFreeze name
 -- }}}
 
@@ -806,19 +831,19 @@ clientCacheSize remoteH = do
 -- }}}
 
 -- clientVerify {{{
-clientVerify :: String -> Maybe CheckSum -> AHandler Bool
+clientVerify :: Key -> Maybe CheckSum -> AHandler Bool
 clientVerify name mbchecksum remoteH = do
   maybe False id <$> clientRecvA (DSRVerify name mbchecksum) remoteH
 -- }}}
 
 -- clientGetSum {{{
-clientGetSum :: String -> AHandler CheckSum
+clientGetSum :: Key -> AHandler CheckSum
 clientGetSum name remoteH = do
-  maybe (0,"") id <$> clientRecvA (DSRGetSum name) remoteH
+  maybe (0,BS.empty) id <$> clientRecvA (DSRGetSum name) remoteH
 -- }}}
 
 -- clientDup {{{
-clientDup :: Bool -> String -> DServerInfo -> AHandler Bool
+clientDup :: Bool -> Key -> DServerInfo -> AHandler Bool
 clientDup cache name target = do
   clientTwoStage req (const $ return True)
   where
@@ -829,34 +854,34 @@ clientDup cache name target = do
 
 clientCmdH :: [String] -> AHandler (Either Bool [String])
 -- Left
-clientCmdH ("put":name:filename:[]) =
-  (Left <$>) . clientPutFile False name filename
-clientCmdH ("putc":name:filename:[]) =
-  (Left <$>) . clientPutFile True name filename
-clientCmdH ("get":name:filename:[]) =
-  (Left <$>) . clientGetFile False name filename
-clientCmdH ("getc":name:filename:[]) =
-  (Left <$>) . clientGetFile True name filename
-clientCmdH ("del":name:[]) =
-  (Left <$>) . clientDel False name
-clientCmdH ("delc":name:[]) =
-  (Left <$>) . clientDel True name
-clientCmdH ("freeze":name:[]) =
-  (Left <$>) . clientFreeze name
+clientCmdH ("put":key:filename:[]) =
+  (Left <$>) . clientPutFile False (toKey key) filename
+clientCmdH ("putc":key:filename:[]) =
+  (Left <$>) . clientPutFile True (toKey key) filename
+clientCmdH ("get":key:filename:[]) =
+  (Left <$>) . clientGetFile False (toKey key) filename
+clientCmdH ("getc":key:filename:[]) =
+  (Left <$>) . clientGetFile True (toKey key) filename
+clientCmdH ("del":key:[]) =
+  (Left <$>) . clientDel False (toKey key)
+clientCmdH ("delc":key:[]) =
+  (Left <$>) . clientDel True (toKey key)
+clientCmdH ("freeze":key:[]) =
+  (Left <$>) . clientFreeze (toKey key)
 clientCmdH ("freeze":[]) =
   (Left <$>) . clientFreezeAll
 clientCmdH ("backup":[]) =
   (Left <$>) . clientBackup
-clientCmdH ("verify":name:[]) =
-  (Left <$>) . clientVerify name Nothing
-clientCmdH ("verify":name:size:sum:[]) =
-  (Left <$>) . clientVerify name (Just (read size, sum))
-clientCmdH ("dup":name:tHost:tPort:[]) =
-  (Left <$>) . clientDup False name serverinfo
+clientCmdH ("verify":key:[]) =
+  (Left <$>) . clientVerify (toKey key) Nothing
+clientCmdH ("verify":key:size:sumstr:[]) =
+  (Left <$>) . clientVerify (toKey key) (Just (read size, readSHA1 sumstr))
+clientCmdH ("dup":key:tHost:tPort:[]) =
+  (Left <$>) . clientDup False (toKey key) serverinfo
   where
     serverinfo = DServerInfo tHost (read tPort) storageServiceType
-clientCmdH ("dupc":name:tHost:tPort:[]) =
-  (Left <$>) . clientDup True name serverinfo
+clientCmdH ("dupc":key:tHost:tPort:[]) =
+  (Left <$>) . clientDup True (toKey key) serverinfo
   where
     serverinfo = DServerInfo tHost (read tPort) storageServiceType
 -- Right
@@ -866,8 +891,8 @@ clientCmdH ("lsc":[]) =
   (Right . map show . Map.toList <$>) . clientList True
 clientCmdH ("cache":[]) =
   (Right . return . show <$>) . clientCacheSize
-clientCmdH ("getsum":name:[]) =
-  (Right . return . show <$>) . clientGetSum name
+clientCmdH ("getsum":key:[]) =
+  (Right . return . show <$>) . clientGetSum (toKey key)
 -- XX
 clientCmdH cmd =
   const $ (putStrLn $ "?: " ++ show cmd) >> (return $ Left False)
@@ -984,7 +1009,8 @@ runXDup cache lst (name:fromIxStr:toIxStr:[]) = do
   if fromIx >= length lst || toIx >= length lst
   then putStrLn "idup, Ix out of range"
   else do
-    result <- accessServer (lst !! fromIx) $ clientDup cache name (lst !! toIx)
+    result <- accessServer (lst !! fromIx) $
+                clientDup cache (toKey name) (lst !! toIx)
     putStrLn $ "dup: " ++ show result
 runXDup _ _ _ = putStrLn "runXDup, wrong args"
 -- }}}
