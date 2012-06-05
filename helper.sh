@@ -41,7 +41,7 @@ case "$1" in
     ;;
   'b') # build
     echo "with opts: ${ghcopts}"
-    ghc ${ghcopts} "$2"
+    ghc ${ghcopts} "$2" |& less
     ;;
   'x') # start to run
     shift

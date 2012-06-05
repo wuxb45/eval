@@ -4,6 +4,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE BangPatterns #-}
 -- }}}
 
 -- module export {{{
@@ -13,10 +14,11 @@ module Eval.DSet (
   MetaCountMap, MetaFullMap, MetaSimpleMap,
   StorageInfo, DSetNode(..), DSetReq(..),
   -- client
+  clientAddElem, clientDelElem,
   clientAddElemN, clientDelElemN, clientDelAll,
   clientGetSet, clientPickStorR, clientPickStorW,
   clientSimpleMap, clientFullMap, clientCountMap,
-  clientBackup, clientDSetCmdH, clientCmdH,
+  clientBackup, clientCmdH,
   -- user
   lookupDSetServer, putDSetBS, makeStdEname,
   runDSetClientREPL, putSingleton, putSplit, getFile,
@@ -50,7 +52,7 @@ import System.IO (Handle, withFile, IOMode(..),
 import Data.List (map, filter, foldr, length,
                   concat, sum, words,)
 import System.FilePath (FilePath, )
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, renameFile,)
 import GHC.Generics (Generic)
 import Text.Printf (printf)
 ------
@@ -59,9 +61,11 @@ import Eval.DServ (ZKInfo(..), DServerInfo(..), DService(..),
                    accessServer, forkServer, waitCloseSignal, listServer,
                    forkChildrenWatcher,
                    commonInitial, aHandler, clientRecvA, clientNoRecv,
-                   respOK, respFail, putObject, getObject,)
+                   respOK, respFail, putObject, getObject, )
 import Eval.Storage (CheckSum, DSDirInfo, listOnlineStorage, clientList,
-                     clientPutBS, checkSumBS, openBinBufFile, clientGetH,)
+                     clientPutBS, checkSumBS, openBinBufFile, clientGetH,
+                     uniqueName, toKey, fromKey, showCheckSum, Key,
+                     readSHA1,)
                
 -- }}}
 
@@ -72,15 +76,15 @@ data DSetConfig = DSetConfig
     confZKInfo   :: ZKInfo }
 -- }}}
 -- DataSet {{{
-type DataSet = Map String CheckSum
+type DataSet = Map Key CheckSum
 -- }}}
 -- DSetMetaMap {{{
-type DSetMetaMap = Map String (RWVar.RWVar DataSet)
+type DSetMetaMap = Map Key (RWVar.RWVar DataSet)
 -- }}}
 -- Meta*Map {{{
-type MetaSimpleMap = Map String [String]
-type MetaFullMap = Map String [(String, CheckSum)]
-type MetaCountMap = Map String [(String, CheckSum, Integer)]
+type MetaSimpleMap = Map Key [Key]
+type MetaFullMap = Map Key [(Key, CheckSum)]
+type MetaCountMap = Map Key [(Key, CheckSum, Integer)]
 -- }}}
 -- DSetNode {{{
 -- (_, files, caches)
@@ -94,13 +98,13 @@ data DSetNode = DSetNode
 -- }}}
 -- DSetReq {{{
 data DSetReq
-  = DSetRAddElemN    String [(String, CheckSum)]
-  | DSetRAddElem     String (String, CheckSum)
-  | DSetRDelElemN    String [String]
-  | DSetRDelElem     String String
-  | DSetRDelAll      String
-  | DSetRGetSet      String -- returns DataSet
-  | DSetRPickStorR   String -- returns (Maybe DServerInfo)
+  = DSetRAddElemN    Key [(Key, CheckSum)]
+  | DSetRAddElem     Key (Key, CheckSum)
+  | DSetRDelElemN    Key [Key]
+  | DSetRDelElem     Key Key
+  | DSetRDelAll      Key
+  | DSetRGetSet      Key -- returns DataSet
+  | DSetRPickStorR   Key -- returns (Maybe DServerInfo)
   | DSetRPickStorW
   | DSetRSimpleMap
   | DSetRFullMap
@@ -118,18 +122,22 @@ dsetBackup :: DSetNode -> IO ()
 dsetBackup node = do
   dsMap <- RWVar.with (dsetMetaMap node) return
   pureMap <- Trav.mapM (flip RWVar.with return) dsMap
-  withFile (confMetaData $ dsetConfig node) WriteMode (flip putObject pureMap)
+  let meta = confMetaData $ dsetConfig node
+  suffix <- uniqueName
+  let tmpmeta = meta ++ ".tmp." ++ suffix
+  withFile tmpmeta WriteMode (flip putObject pureMap)
+  renameFile tmpmeta meta
 -- }}}
 
 -- dsetLookup {{{
-dsetLookup :: DSetNode -> String -> IO DataSet
+dsetLookup :: DSetNode -> Key -> IO DataSet
 dsetLookup node sname = do
   mbset <- RWVar.with (dsetMetaMap node) $ return . Map.lookup sname
   maybe (return Map.empty) (\s -> RWVar.with s return) mbset
 -- }}}
 
 -- dsetAddElem {{{
-dsetAddElem :: DSetNode -> String -> (String, CheckSum) -> IO ()
+dsetAddElem :: DSetNode -> Key -> (Key, CheckSum) -> IO ()
 dsetAddElem node sname (k,v) = do
   let newMap = Map.singleton k v
   mbset <- RWVar.with (dsetMetaMap node) $ return . Map.lookup sname
@@ -139,11 +147,10 @@ dsetAddElem node sname (k,v) = do
     _ -> do
       set <- RWVar.new newMap
       RWVar.modify_ (dsetMetaMap node) $ return . Map.insert sname set
-  --dsetBackup node
 -- }}}
 
 -- dsetAddElemN {{{
-dsetAddElemN :: DSetNode -> String -> [(String, CheckSum)] -> IO ()
+dsetAddElemN :: DSetNode -> Key -> [(Key, CheckSum)] -> IO ()
 dsetAddElemN node sname pairs = do
   let newMap = Map.fromList pairs
   mbset <- RWVar.with (dsetMetaMap node) $ return . Map.lookup sname
@@ -153,36 +160,32 @@ dsetAddElemN node sname pairs = do
     _ -> do
       set <- RWVar.new newMap
       RWVar.modify_ (dsetMetaMap node) $ return . Map.insert sname set
-  --dsetBackup node
 -- }}}
 
 -- dsetDelElem {{{
-dsetDelElem :: DSetNode -> String -> String -> IO ()
+dsetDelElem :: DSetNode -> Key -> Key -> IO ()
 dsetDelElem node sname ename = do
   mbset <- RWVar.with (dsetMetaMap node) $ return . Map.lookup sname
   case mbset of
     Just set -> do
       RWVar.modify_ set $ return . Map.delete ename
     _ -> return ()
-  --dsetBackup node
 -- }}}
 
 -- dsetDelElemN {{{
-dsetDelElemN :: DSetNode -> String -> [String] -> IO ()
+dsetDelElemN :: DSetNode -> Key -> [Key] -> IO ()
 dsetDelElemN node sname enames = do
   mbset <- RWVar.with (dsetMetaMap node) $ return . Map.lookup sname
   case mbset of
     Just set -> do
       RWVar.modify_ set $ return . flip (foldr Map.delete) enames
     _ -> return ()
-  --dsetBackup node
 -- }}}
 
 -- dsetDelAll {{{
-dsetDelAll :: DSetNode -> String -> IO ()
+dsetDelAll :: DSetNode -> Key -> IO ()
 dsetDelAll node sname = do
   RWVar.modify_ (dsetMetaMap node) $ return . Map.delete sname
-  --dsetBackup node
 -- }}}
 
 -- dsetSimpleMap {{{
@@ -249,7 +252,7 @@ rollDice node = modifyMVar (dsetSeed node) $ \s -> return (s + 1, s)
 -- }}}
 
 -- pickStorageR {{{
-pickStorageR :: DSetNode -> String -> IO (Maybe DServerInfo)
+pickStorageR :: DSetNode -> Key -> IO (Maybe DServerInfo)
 pickStorageR node ename = do
   arr <- readMVar (dsetStorage node)
   let (_, maxix) = bounds arr
@@ -280,7 +283,7 @@ pickStorageW node = do
 -- }}}
 
 -- countDuplicate {{{
-countDuplicate :: DSetNode -> String -> CheckSum -> IO Integer
+countDuplicate :: DSetNode -> Key -> CheckSum -> IO Integer
 countDuplicate node ename chksum = do
   storArr <- readMVar (dsetStorage node)
   return $ sum $ map getDup01 $ Arr.elems storArr
@@ -350,7 +353,7 @@ makeConf zkinfo rootpath = do
 -- }}}
 
 -- dsetRemoteLookup {{{
-dsetRemoteLookup :: DSetNode -> String -> Handle -> IO ()
+dsetRemoteLookup :: DSetNode -> Key -> Handle -> IO ()
 dsetRemoteLookup node sname remoteH = do
   respOK remoteH
   set <- dsetLookup node sname
@@ -359,7 +362,7 @@ dsetRemoteLookup node sname remoteH = do
 -- }}}
 
 -- dsetRemotePickStorageR {{{
-dsetRemotePickStorageR :: DSetNode -> String -> Handle -> IO ()
+dsetRemotePickStorageR :: DSetNode -> Key -> Handle -> IO ()
 dsetRemotePickStorageR node ename remoteH = do
   respOK remoteH
   mbstor <- pickStorageR node ename
@@ -452,28 +455,38 @@ handleReq node remoteH req = do
 -- }}}
 
 -- client {{{
+-- clientAddElem {{{
+clientAddElem :: Key -> (Key, CheckSum) -> AHandler Bool
+clientAddElem sname value remoteH = do
+  clientNoRecv (DSetRAddElem sname value) remoteH
+-- }}}
+-- clientDelElem {{{
+clientDelElem :: Key -> Key -> AHandler Bool
+clientDelElem sname ename remoteH = do
+  clientNoRecv (DSetRDelElem sname ename) remoteH
+-- }}}
 -- clientAddElemN {{{
-clientAddElemN :: String -> [(String, CheckSum)] -> AHandler Bool
+clientAddElemN :: Key -> [(Key, CheckSum)] -> AHandler Bool
 clientAddElemN sname values remoteH = do
   clientNoRecv (DSetRAddElemN sname values) remoteH
 -- }}}
 -- clientDelElemN {{{
-clientDelElemN :: String -> [String] -> AHandler Bool
+clientDelElemN :: Key -> [Key] -> AHandler Bool
 clientDelElemN sname enames remoteH = do
   clientNoRecv (DSetRDelElemN sname enames) remoteH
 -- }}}
 -- clientDelAll {{{
-clientDelAll :: String -> AHandler Bool
+clientDelAll :: Key -> AHandler Bool
 clientDelAll sname remoteH = do
   clientNoRecv (DSetRDelAll sname) remoteH
 -- }}}
 -- clientGetSet {{{
-clientGetSet :: String -> AHandler (Maybe DataSet)
+clientGetSet :: Key -> AHandler (Maybe DataSet)
 clientGetSet sname remoteH = do
   clientRecvA (DSetRGetSet sname) remoteH
 -- }}}
 -- clientPickStorR {{{
-clientPickStorR :: String -> AHandler (Maybe DServerInfo)
+clientPickStorR :: Key -> AHandler (Maybe DServerInfo)
 clientPickStorR ename remoteH = do
   join <$> clientRecvA (DSetRPickStorR ename) remoteH
 -- }}}
@@ -491,7 +504,7 @@ clientSimpleMapList :: AHandler [String]
 clientSimpleMapList remoteH = do
   tree <- maybe Map.empty id <$> clientSimpleMap remoteH
   return $ concat $ Map.elems $
-    Map.mapWithKey (\k v -> ((k ++ " ## ") ++) <$> v) tree
+    Map.mapWithKey (\k v -> ((fromKey k ++ "## ") ++) . fromKey <$> v) tree
 -- }}}
 -- clientFullMap {{{
 clientFullMap :: AHandler (Maybe MetaFullMap)
@@ -502,7 +515,9 @@ clientFullMapList :: AHandler [String]
 clientFullMapList remoteH = do
   tree <- maybe Map.empty id <$> clientFullMap remoteH
   return $ concat $ Map.elems $
-    Map.mapWithKey (\k v -> ((k ++ " ## ") ++) . show <$> v) tree
+    Map.mapWithKey (\k v -> ((fromKey k ++ "## ") ++) . showPair <$> v) tree
+  where
+    showPair (k, cs) = fromKey k ++ ", " ++ showCheckSum cs
 -- }}}
 -- clientCountMap {{{
 clientCountMap :: AHandler (Maybe MetaCountMap)
@@ -513,7 +528,9 @@ clientCountMapList :: AHandler [String]
 clientCountMapList remoteH = do
   tree <- maybe Map.empty id <$> clientCountMap remoteH
   return $ concat $ Map.elems $
-    Map.mapWithKey (\k v -> ((k ++ " ## ") ++) . show <$> v) tree
+    Map.mapWithKey (\k v -> ((fromKey k ++ " ## ") ++) . showPair <$> v) tree
+  where
+    showPair (k, cs, n) = fromKey k ++ ", " ++ showCheckSum cs ++ ", " ++ show n
 -- }}}
 -- clientBackup {{{
 clientBackup :: AHandler Bool
@@ -521,20 +538,17 @@ clientBackup remoteH = do
   clientNoRecv (DSetRBackup) remoteH
 -- }}}
 -- clientDSetCmd {{{
-clientDSetCmdH :: [String] -> AHandler (Either Bool [String])
-clientDSetCmdH = clientCmdH
-
 clientCmdH :: [String] -> AHandler (Either Bool [String])
 clientCmdH ("addm1":sname:ename:len:chksum:[]) =
-  (Left <$>) . clientAddElemN sname [(ename, (read len, chksum))]
+  (Left <$>) . clientAddElem (toKey sname) ((toKey ename), (read len, readSHA1 chksum))
 clientCmdH ("delm1":sname:ename:[]) =
-  (Left <$>) . clientDelElemN sname [ename]
+  (Left <$>) . clientDelElem (toKey sname) (toKey ename)
 clientCmdH ("delm":sname:[]) =
-  (Left <$>) . clientDelAll sname
+  (Left <$>) . clientDelAll (toKey sname)
 clientCmdH ("getm":sname:[]) =
-  (Right . map show . maybe [] Map.toList <$>) . clientGetSet sname
+  (Right . map show . maybe [] Map.toList <$>) . clientGetSet (toKey sname)
 clientCmdH ("pickr":ename:[]) =
-  (Right . return . show <$>) . clientPickStorR ename
+  (Right . return . show <$>) . clientPickStorR (toKey ename)
 clientCmdH ("pickw":[]) =
   (Right . return . show <$>) . clientPickStorW
 clientCmdH ("ls":[]) =
@@ -546,7 +560,6 @@ clientCmdH ("lc":[]) =
 clientCmdH ("backup":[]) =
   (Left <$>) . clientBackup
 clientCmdH _ = return . const (Right ["unknown command!"])
-
 -- }}}
 -- }}}
 
@@ -565,7 +578,7 @@ lookupDSetServer zkinfo = do
 -- }}}
 
 -- putDSetBS {{{
-putDSetBS :: DServerInfo -> String -> String -> BS.ByteString -> IO Bool
+putDSetBS :: DServerInfo -> Key -> Key -> BS.ByteString -> IO Bool
 putDSetBS dset sname ename bs = do
   mbstor <- join <$> accessServer dset clientPickStorW
   case mbstor of
@@ -578,12 +591,13 @@ putDSetBS dset sname ename bs = do
 -- }}}
 
 -- makeStdEname {{{
-makeStdEname :: String -> Integer -> String
-makeStdEname sname ix = printf "%s/%s/%09d" sname sname ix
+makeStdEname :: Key -> Integer -> Key
+makeStdEname sname ix = toKey $ printf "%s/%s/%09d" str str ix
+  where str = fromKey sname
 -- }}}
 
 -- putSingleton {{{
-putSingleton :: DServerInfo -> String -> FilePath -> IO Bool
+putSingleton :: DServerInfo -> Key -> FilePath -> IO Bool
 putSingleton dset sname filepath = do
   let ename = makeStdEname sname 0
   bs <- BS.readFile filepath
@@ -594,7 +608,7 @@ putSingleton dset sname filepath = do
 dsetSplitLimit :: Int
 dsetSplitLimit = 0x8000000 -- 128M
 
-putSplit :: DServerInfo -> String -> FilePath -> IO Bool
+putSplit :: DServerInfo -> Key -> FilePath -> IO Bool
 putSplit dset sname filepath = do
   h <- openBinBufFile filepath ReadMode
   recPut h 0
@@ -612,7 +626,7 @@ putSplit dset sname filepath = do
 -- }}}
 
 -- getFile {{{
-getFile :: DServerInfo -> String -> FilePath -> IO Bool
+getFile :: DServerInfo -> Key -> FilePath -> IO Bool
 getFile dset sname filepath = do
   mbdataset <- join <$> accessServer dset (clientGetSet sname)
   case mbdataset of
@@ -684,13 +698,13 @@ runLoopREPL zkinfo server = do
     case cmd of
       ("h":[]) -> printHelp
       ("put1":sname:filename:[]) -> do
-        ok <- putSingleton server sname filename
+        ok <- putSingleton server (toKey sname) filename
         putStrLn $ "upload single: " ++ show ok
       ("put":sname:filename:[]) -> do
-        ok <- putSplit server sname filename
+        ok <- putSplit server (toKey sname) filename
         putStrLn $ "upload split: " ++ show ok
       ("get":sname:filename:[]) -> do
-        ok <- getFile server sname filename
+        ok <- getFile server (toKey sname) filename
         putStrLn $ "get file: " ++ show ok
       _ -> accessAndPrint server cmd
     runLoopREPL zkinfo server

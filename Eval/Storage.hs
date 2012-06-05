@@ -12,8 +12,9 @@
 
 -- module export {{{
 module Eval.Storage (
-  DStorConfig, DSReq(..), CheckSum,
+  DStorConfig, DSReq(..), CheckSum, Key,
   DSNode(..), DSDirInfo, DSFile(..), DSData,
+  showBS, showCheckSum, readSHA1,
   checkSumBS, checkSumBSL, checkSumFile, checkSumDSPath,
   uniqueName, openBinBufFile, getFileSize,
   pipeSome, pipeAll, toKey, fromKey,
@@ -55,7 +56,7 @@ import System.IO (Handle, withFile, IOMode(..),
                   putStrLn, BufferMode(..), hSetBuffering,
                   openBinaryFile, hClose, hFlush, stdout, getLine)
 import Data.Tuple (swap,)
-import Data.List (map, filter, all, elem, (!!),
+import Data.List (map, filter, all, elem, (!!), concatMap,
                   zip, words, length, head, sum,)
 import System.IO.Unsafe (unsafePerformIO)
 import System.FilePath (FilePath, (</>),)
@@ -152,6 +153,16 @@ instance Serialize DSReq where
 -- }}}
 
 -- basic helper {{{
+
+-- showBS {{{
+showBS :: BS.ByteString -> String
+showBS = concatMap (printf "%02x") . BS.unpack
+-- }}}
+
+-- showCheckSum {{{
+showCheckSum :: CheckSum -> String
+showCheckSum (len, bs) = show len ++ showBS bs
+-- }}}
 
 -- readSHA1 {{{
 readSHA1 :: String -> BS.ByteString
@@ -887,9 +898,13 @@ clientCmdH ("dupc":key:tHost:tPort:[]) =
     serverinfo = DServerInfo tHost (read tPort) storageServiceType
 -- Right
 clientCmdH ("ls":[]) =
-  (Right . map show . Map.toList <$>) . clientList False
+  (Right . map showPair . Map.toList <$>) . clientList False
+  where
+    showPair (k, cs) = fromKey k ++ ", " ++ showCheckSum cs
 clientCmdH ("lsc":[]) =
-  (Right . map show . Map.toList <$>) . clientList True
+  (Right . map showPair . Map.toList <$>) . clientList True
+  where
+    showPair (k, cs) = fromKey k ++ ", " ++ showCheckSum cs
 clientCmdH ("cache":[]) =
   (Right . return . show <$>) . clientCacheSize
 clientCmdH ("getsum":key:[]) =
