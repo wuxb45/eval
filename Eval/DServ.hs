@@ -37,7 +37,7 @@ import Control.Monad (Monad(..), void, when,)
 import Control.Concurrent (forkIO, yield, ThreadId,)
 import Control.Concurrent.MVar (MVar, putMVar, takeMVar,
                                 newEmptyMVar, tryPutMVar,)
-import Control.Exception (SomeException, Exception,
+import Control.Exception (SomeException, Exception, finally,
                           handle, bracket, catch, throwTo,)
 import Data.Either (Either(..))
 import Data.Serialize (Serialize(..), encode, decode, encodeLazy, decodeLazy, )
@@ -197,7 +197,7 @@ oneServer :: Socket -> DService -> IO ()
 oneServer sock ds = do
   (h, _, _) <- accept sock
   hSetBuffering h $ BlockBuffering Nothing --LineBuffering
-  void $ forkIO $ (dsHandler ds) h `catch` aHandler ()
+  void $ forkIO $ ((dsHandler ds) h `finally` hClose h) `catch` aHandler ()
 -- }}}
 -- forkServer {{{
 forkServer :: ZKInfo -> DService -> Integer -> IO (Maybe DServerData)
