@@ -23,6 +23,8 @@ module Eval.DSet (
   lookupDSetServer, putDSetBS, makeStdEname,
   runDSetClientREPL, putSingleton, putSplit, getFile,
   runDSetSimpleServer,
+  -- test
+  testAddN,
   ) where
 -- }}}
 
@@ -41,17 +43,19 @@ import Control.Applicative ((<$>), )
 import Control.Monad (Monad(..), mapM, mapM_, join, void,)
 import Control.Concurrent (MVar, readMVar, modifyMVar_, newMVar,
                            modifyMVar, threadDelay, forkIO,)
-import Control.Exception (catch,)
+import Control.Exception (catch, finally,)
 import Data.Array.IArray
 import Data.Either (Either(..))
 import Data.Map (Map)
 import Data.Maybe (Maybe(..), maybe, )
 import Data.Serialize (Serialize(..),)
-import System.IO (Handle, withFile, IOMode(..),
-                  getLine, putStrLn, hFlush, stdout,)
+import System.IO (Handle, withFile, IOMode(..), hClose,
+                  getLine, putStrLn, hFlush, stdout, hGetLine,)
 import Data.List (map, filter, foldr, length,
-                  concat, sum, words,)
+                  concat, sum, words, splitAt,)
+import System.Posix.Process (getProcessID)
 import System.FilePath (FilePath, )
+import System.CPUTime.Rdtsc (rdtsc)
 import System.Directory (createDirectoryIfMissing, renameFile,)
 import GHC.Generics (Generic)
 import Text.Printf (printf)
@@ -718,6 +722,46 @@ accessAndPrint si args = do
     Just (Left ok) -> putStrLn $ "result: " ++ show ok
     Just (Right lst) -> putStrLn "result list: " >> mapM_ putStrLn lst
     _ -> putStrLn "accessServer failed"
+-- }}}
+
+-- testAddN {{{
+testAddN :: ZKInfo -> FilePath -> IO ()
+testAddN zkinfo filepath = do
+  commonInitial
+  mbserver <- lookupDSetServer zkinfo
+  case mbserver of
+    Just server -> do
+      kvList <- loadTestCase1 filepath
+      putStrLn $ "len: " ++ show (length kvList)
+      let kvGroup = partitionTC kvList
+      runTestAddN server kvGroup
+    _ -> putStrLn "no server"
+
+runTestAddN :: DServerInfo -> [[(Key, CheckSum)]] -> IO ()
+runTestAddN dsi gList = do
+  pid <- (toKey . show) <$> getProcessID
+  t1 <- rdtsc
+  mapM_ (\kv -> accessServer dsi (clientAddElemN pid kv)) gList
+  t2 <- rdtsc
+  putStrLn $ "time:" ++ show (t2 - t1)
+
+partitionTC :: [(Key, CheckSum)] -> [[(Key, CheckSum)]]
+partitionTC [] = []
+partitionTC l = a:(partitionTC b)
+  where (a,b) = splitAt 50 l
+
+loadTestCase1 :: FilePath -> IO [(Key, CheckSum)]
+loadTestCase1 filepath = do
+  h <- openBinBufFile filepath ReadMode
+  iterLoad1 h `finally` hClose h
+
+iterLoad1 :: Handle -> IO [(Key, CheckSum)]
+iterLoad1 h = do
+  [keystr,len,sha1] <- words <$> hGetLine h
+  let kv = (toKey keystr, (read len, readSHA1 sha1))
+  restKV <- iterLoad1 h
+  return (kv:restKV)
+
 -- }}}
 
 -- }}}
