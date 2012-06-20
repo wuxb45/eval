@@ -51,8 +51,8 @@ import Data.Maybe (Maybe(..), maybe, )
 import Data.Serialize (Serialize(..),)
 import System.IO (Handle, withFile, IOMode(..), hClose,
                   getLine, putStrLn, hFlush, stdout, hGetLine,)
-import Data.List (map, filter, foldr, length,
-                  concat, sum, words, splitAt,)
+import Data.List (map, filter, foldr, length, span, tail,
+                  concat, sum, words, splitAt, takeWhile,)
 import System.Posix.Process (getProcessID)
 import System.FilePath (FilePath, )
 import System.CPUTime.Rdtsc (rdtsc)
@@ -757,7 +757,10 @@ loadTestCase1 filepath = do
 
 iterLoad1 :: Handle -> IO [(Key, CheckSum)]
 iterLoad1 h = do
-  [keystr,len,sha1] <- words <$> hGetLine h
+  l <- hGetLine h
+  let (keystr, rest2) = span (/= '\1') l
+  let (len, rest1) = span (/= '\1') $ tail rest2
+  let sha1 = takeWhile (/= ' ') $ tail rest1
   let kv = (toKey keystr, (read len, readSHA1 sha1))
   restKV <- iterLoad1 h
   return (kv:restKV)
